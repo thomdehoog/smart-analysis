@@ -38,9 +38,11 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
             "eccentricity": float(props['eccentricity'][idx]),
         })
 
+    run_label = pipeline_data["metadata"].get("workflow_name", "run")
+
     feedback = {
         "datetime": datetime.now().strftime("%Y%m%d-%H%M%S"),
-        "label": pipeline_data["metadata"]["label"],
+        "workflow": run_label,
         "selection_criteria": {
             "feature": select_by,
             "percentile": pipeline_data["extract_features"]["percentile"],
@@ -54,7 +56,8 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     # Write JSON
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    filename = f"feedback_{pipeline_data['metadata']['label']}.json"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"feedback_{run_label}_{timestamp}.json"
     filepath = out_path / filename
 
     with open(filepath, 'w') as f:
