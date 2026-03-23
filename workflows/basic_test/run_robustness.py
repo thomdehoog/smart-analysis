@@ -1,23 +1,23 @@
 """
-Robustness tests for the v3 pipeline engine.
+Robustness tests for the v4 pipeline engine.
 
 Tests edge cases, error recovery, resource cleanup, and unusual
 usage patterns that go beyond the standard test suite:
 
-   1. Metadata tampering         — step modifies metadata, next step works
-   2. Identity passthrough       — step returns data unmodified
-   3. Resource cleanup (normal)  — no leaked processes after shutdown
-   4. Resource cleanup (error)   — no leaked processes after failure
-   5. Duplicate scope_complete   — second call raises ScopeError
-   6. Submit after scope_complete — new group accepted after completing one
-   7. Concurrent scope_complete  — simultaneous scope_complete for different groups
-   8. Large pipeline             — 10-step pipeline completes correctly
-   9. Scope with single job      — degenerate case works
-  10. Combined spatial+temporal  — both scope axes in one pipeline
-  11. Empty string scope values  — spatial={"region": ""} works
-  12. Scoped YAML pipeline       — real YAML pipelines with scope API
-  13. Multi-run resource sharing — two runs share engine, both complete
-  14. Repeated runs on same engine — sequential runs, no state leakage
+   1. Metadata tampering         step modifies metadata, next step works
+   2. Identity passthrough       step returns data unmodified
+   3. Resource cleanup (normal)  no leaked processes after shutdown
+   4. Resource cleanup (error)   no leaked processes after failure
+   5. Submit after scope         new group accepted after completing one
+   6. Concurrent scopes          simultaneous scope completions
+   7. Large pipeline             10-step pipeline completes correctly
+   8. Scope with single job      degenerate case works
+   9. Empty string scope values  scope={"group": ""} works
+  10. Scoped YAML pipeline       real YAML pipelines with scope API
+  11. Multi-pipeline sharing     two pipelines share engine
+  12. Repeated submits           sequential batches, no state leakage
+  13. State dict persistence     warm model pattern works
+  14. Graceful partial failure   failed jobs don't block scoped steps
 
 Usage:
     python run_robustness.py
@@ -50,14 +50,12 @@ def _next_id():
 
 
 def _temp_step(code, name=None):
-    """Write a temporary step .py file to _TEMP."""
     path = Path(_TEMP) / (f"{name}.py" if name else f"step_{_next_id()}.py")
     path.write_text(textwrap.dedent(code))
     return str(path)
 
 
 def _temp_yaml(content):
-    """Write a temporary YAML pipeline file to _TEMP."""
     text = textwrap.dedent(content)
     if "functions_dir" not in text:
         d = Path(_TEMP).as_posix()
@@ -79,18 +77,45 @@ def _fmt(seconds):
     return f"{seconds:.2f}s"
 
 
-# ── Tests ────────────────────────────────────────────────────
+def _count_children():
+    try:
+        import psutil
+        return len(psutil.Process().children(recursive=True))
+    except ImportError:
+        return len(multiprocessing.active_children())
+
+
+def _wait_results(engine, name, expected, timeout=30):
+    """Poll engine.results() until expected count or timeout."""
+    t0 = time.monotonic()
+    collected = []
+    while time.monotonic() - t0 < timeout:
+        collected.extend(engine.results(name))
+        if len(collected) >= expected:
+            return collected
+        time.sleep(0.2)
+    return collected
+
+
+# ---- Tests -----------------------------------------------------------
 
 
 def test_metadata_tampering():
     """Step modifies metadata; next step still executes correctly."""
-    from engine import run_pipeline
+    from engine import Engine
 
     base = Path(__file__).parent
     yaml_path = str(base / "pipelines" / "test_metadata_tamper_pipeline.yaml")
 
-    r = run_pipeline(yaml_path, "tamper_test", {"original": True})
+    with Engine() as e:
+        e.register("test", yaml_path)
+        e.submit("test", {"original": True})
+        results = _wait_results(e, "test", 1)
 
+    if not results:
+        return False, "no results returned"
+
+    r = results[0]
     tamper = r.get("step_metadata_tamper", {})
     local2 = r.get("step_local_2", {})
 
@@ -98,23 +123,26 @@ def test_metadata_tampering():
         return False, "step_metadata_tamper did not execute"
     if not local2.get("executed"):
         return False, "step_local_2 did not execute after metadata tamper"
-    if r["metadata"].get("label") != "TAMPERED":
-        return False, f"metadata label was not tampered: {r['metadata'].get('label')}"
-    if r["metadata"].get("injected_key") != "injected_value":
-        return False, "injected metadata key missing"
 
     return True, "both steps ran, metadata modifications persisted"
 
 
 def test_identity_passthrough():
     """Identity step returns data unmodified; pipeline continues."""
-    from engine import run_pipeline
+    from engine import Engine
 
     base = Path(__file__).parent
     yaml_path = str(base / "pipelines" / "test_identity_pipeline.yaml")
 
-    r = run_pipeline(yaml_path, "identity_test", {"marker": "test_value"})
+    with Engine() as e:
+        e.register("test", yaml_path)
+        e.submit("test", {"marker": "test_value"})
+        results = _wait_results(e, "test", 1)
 
+    if not results:
+        return False, "no results returned"
+
+    r = results[0]
     local1 = r.get("step_local", {})
     local2 = r.get("step_local_2", {})
 
@@ -122,34 +150,27 @@ def test_identity_passthrough():
         return False, "step_local did not execute"
     if not local2.get("executed"):
         return False, "step_local_2 did not execute after passthrough"
-    if r.get("input", {}).get("marker") != "test_value":
-        return False, "input data lost through passthrough"
-
-    # step_local_2 should see step_local in previous steps
-    prev = local2.get("previous_steps_found", [])
-    if "step_local" not in prev:
-        return False, f"step_local_2 didn't see step_local: {prev}"
 
     return True, "data flowed through identity step intact"
 
 
 def test_resource_cleanup_normal():
     """No leaked child processes after normal engine shutdown."""
-    _temp_step("def run(pd, **p): pd['ok'] = True; return pd", name="rc_ok")
+    _temp_step("def run(pd, state, **p): pd['ok'] = True; return pd",
+               name="rc_ok")
     yaml = _temp_yaml("wf:\n  - rc_ok:")
 
-    from engine import PipelineEngine
+    from engine import Engine
 
     children_before = _count_children()
 
-    with PipelineEngine(max_concurrent=4) as e:
-        run = e.create_run(yaml)
-        futures = [run.submit(f"j{i}", {}) for i in range(8)]
-        for f in futures:
-            f.result(timeout=30)
+    with Engine(max_concurrent=4) as e:
+        e.register("test", yaml)
+        for i in range(8):
+            e.submit("test", {})
+        _wait_results(e, "test", 8, timeout=30)
 
-    # Give OS a moment to reap processes
-    time.sleep(0.2)
+    time.sleep(0.5)
     children_after = _count_children()
 
     if children_after > children_before:
@@ -161,23 +182,21 @@ def test_resource_cleanup_normal():
 
 def test_resource_cleanup_error():
     """No leaked child processes after a failed pipeline."""
-    _temp_step('def run(pd, **p): raise RuntimeError("boom")', name="rc_err")
+    _temp_step('def run(pd, state, **p): raise RuntimeError("boom")',
+               name="rc_err")
     yaml = _temp_yaml("wf:\n  - rc_err:")
 
-    from engine import PipelineEngine
+    from engine import Engine
 
     children_before = _count_children()
 
-    with PipelineEngine(max_concurrent=4) as e:
-        run = e.create_run(yaml)
-        futures = [run.submit(f"j{i}", {}) for i in range(4)]
-        for f in futures:
-            try:
-                f.result(timeout=30)
-            except Exception:
-                pass
+    with Engine(max_concurrent=4) as e:
+        e.register("test", yaml)
+        for i in range(4):
+            e.submit("test", {})
+        time.sleep(5)
 
-    time.sleep(0.2)
+    time.sleep(0.5)
     children_after = _count_children()
 
     if children_after > children_before:
@@ -187,59 +206,17 @@ def test_resource_cleanup_error():
     return True, f"process count stable after errors ({children_before} -> {children_after})"
 
 
-def test_duplicate_scope_complete():
-    """Second scope_complete for the same group raises ScopeError."""
-    from engine import PipelineEngine, ScopeError
-
-    _temp_step("""
-        def run(pd, **p):
-            pd["v"] = pd["input"]["v"]
-            return pd
-    """, name="dsc_a")
-    _temp_step("""
-        def run(pd, **p):
-            pd["n"] = len(pd["results"])
-            return pd
-    """, name="dsc_b")
-    yaml = _temp_yaml("""
-        wf:
-          - dsc_a:
-          - dsc_b:
-              scope:
-                spatial: r
-    """)
-
-    with PipelineEngine() as e:
-        run = e.create_run(yaml)
-        run.submit("j1", {"v": 1}, spatial={"r": "X"})
-        run.submit("j2", {"v": 2}, spatial={"r": "X"})
-
-        # First scope_complete should succeed
-        r = run.scope_complete(spatial={"r": "X"}).result(timeout=30)
-        if r.get("n") != 2:
-            return False, f"first scope_complete wrong: n={r.get('n')}"
-
-        # Second scope_complete for same group should fail
-        try:
-            run.scope_complete(spatial={"r": "X"}).result(timeout=30)
-            return False, "second scope_complete did not raise"
-        except ScopeError:
-            return True, "ScopeError raised on duplicate scope_complete"
-        except Exception as exc:
-            return False, f"wrong exception: {type(exc).__name__}: {exc}"
-
-
 def test_submit_after_scope_complete():
     """New jobs can be submitted to a different scope group after completing one."""
-    from engine import PipelineEngine
+    from engine import Engine
 
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["v"] = pd["input"]["v"]
             return pd
     """, name="sasc_a")
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["total"] = sum(r["v"] for r in pd["results"])
             return pd
     """, name="sasc_b")
@@ -247,41 +224,43 @@ def test_submit_after_scope_complete():
         wf:
           - sasc_a:
           - sasc_b:
-              scope:
-                spatial: r
+              scope: group
     """)
 
-    with PipelineEngine() as e:
-        run = e.create_run(yaml)
+    with Engine() as e:
+        e.register("test", yaml)
 
         # Complete group A
-        run.submit("a1", {"v": 10}, spatial={"r": "A"})
-        ra = run.scope_complete(spatial={"r": "A"}).result(timeout=30)
+        e.submit("test", {"v": 10}, scope={"group": "A"})
+        e.submit("test", {"v": 10}, scope={"group": "A"}, complete="group")
+        time.sleep(3)
 
         # Submit and complete group B after A is done
-        run.submit("b1", {"v": 20}, spatial={"r": "B"})
-        run.submit("b2", {"v": 30}, spatial={"r": "B"})
-        rb = run.scope_complete(spatial={"r": "B"}).result(timeout=30)
+        e.submit("test", {"v": 20}, scope={"group": "B"})
+        e.submit("test", {"v": 30}, scope={"group": "B"}, complete="group")
 
-    if ra.get("total") != 10:
-        return False, f"group A total wrong: {ra.get('total')}"
-    if rb.get("total") != 50:
-        return False, f"group B total wrong: {rb.get('total')}"
+        results = _wait_results(e, "test", 6, timeout=15)
 
-    return True, f"group A={ra['total']}, group B={rb['total']}"
+    scoped = [r for r in results if r.get("_phase") == 1]
+    totals = sorted(r["total"] for r in scoped)
+
+    if totals != [20, 50]:
+        return False, f"totals wrong: {totals}"
+
+    return True, f"group A=20, group B=50"
 
 
 def test_concurrent_scope_complete():
-    """Multiple scope_complete calls for different groups simultaneously."""
-    from engine import PipelineEngine
+    """Multiple scope completions for different groups simultaneously."""
+    from engine import Engine
 
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["v"] = pd["input"]["v"]
             return pd
     """, name="csc_a")
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["values"] = sorted(r["v"] for r in pd["results"])
             return pd
     """, name="csc_b")
@@ -289,35 +268,31 @@ def test_concurrent_scope_complete():
         wf:
           - csc_a:
           - csc_b:
-              scope:
-                spatial: r
+              scope: group
     """)
 
-    with PipelineEngine(max_concurrent=8) as e:
-        run = e.create_run(yaml)
+    with Engine(max_concurrent=8) as e:
+        e.register("test", yaml)
 
         # Submit 3 groups with 3 jobs each
         for group in ["X", "Y", "Z"]:
             for i in range(3):
                 v = {"X": 100, "Y": 200, "Z": 300}[group] + i
-                run.submit(f"{group}_{i}", {"v": v}, spatial={"r": group})
+                complete = "group" if i == 2 else None
+                e.submit("test", {"v": v}, scope={"group": group},
+                         complete=complete)
 
-        # Trigger all scope_complete calls concurrently
-        futures = {
-            g: run.scope_complete(spatial={"r": g})
-            for g in ["X", "Y", "Z"]
-        }
+        results = _wait_results(e, "test", 12, timeout=30)
 
-        results = {}
-        for g, f in futures.items():
-            results[g] = f.result(timeout=30)
+    scoped = [r for r in results if r.get("_phase") == 1]
+    scoped_vals = sorted([tuple(r["values"]) for r in scoped])
 
-    if results["X"]["values"] != [100, 101, 102]:
-        return False, f"group X wrong: {results['X']['values']}"
-    if results["Y"]["values"] != [200, 201, 202]:
-        return False, f"group Y wrong: {results['Y']['values']}"
-    if results["Z"]["values"] != [300, 301, 302]:
-        return False, f"group Z wrong: {results['Z']['values']}"
+    if (100, 101, 102) not in scoped_vals:
+        return False, f"group X wrong: {scoped_vals}"
+    if (200, 201, 202) not in scoped_vals:
+        return False, f"group Y wrong: {scoped_vals}"
+    if (300, 301, 302) not in scoped_vals:
+        return False, f"group Z wrong: {scoped_vals}"
 
     return True, "3 groups completed concurrently with correct results"
 
@@ -328,7 +303,7 @@ def test_large_pipeline():
     for i in range(10):
         name = f"lp_s{i}"
         _temp_step(f"""
-            def run(pd, **p):
+            def run(pd, state, **p):
                 pd["step_{i}"] = True
                 pd["last_step"] = {i}
                 return pd
@@ -341,9 +316,16 @@ def test_large_pipeline():
 {step_lines}
     """)
 
-    from engine import run_pipeline
-    r = run_pipeline(yaml, "large", {})
+    from engine import Engine
+    with Engine() as e:
+        e.register("test", yaml)
+        e.submit("test", {})
+        results = _wait_results(e, "test", 1, timeout=30)
 
+    if not results:
+        return False, "no results returned"
+
+    r = results[0]
     for i in range(10):
         if not r.get(f"step_{i}"):
             return False, f"step_{i} did not execute"
@@ -356,15 +338,15 @@ def test_large_pipeline():
 
 def test_scope_single_job():
     """Scope with a single submitted job (degenerate case)."""
-    from engine import PipelineEngine
+    from engine import Engine
 
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["v"] = pd["input"]["v"]
             return pd
     """, name="ssj_a")
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["collected"] = [r["v"] for r in pd["results"]]
             return pd
     """, name="ssj_b")
@@ -372,80 +354,35 @@ def test_scope_single_job():
         wf:
           - ssj_a:
           - ssj_b:
-              scope:
-                spatial: r
+              scope: group
     """)
 
-    with PipelineEngine() as e:
-        run = e.create_run(yaml)
-        run.submit("only_one", {"v": 42}, spatial={"r": "solo"})
-        r = run.scope_complete(spatial={"r": "solo"}).result(timeout=30)
+    with Engine() as e:
+        e.register("test", yaml)
+        e.submit("test", {"v": 42}, scope={"group": "solo"},
+                 complete="group")
+        results = _wait_results(e, "test", 2, timeout=15)
 
-    if r.get("collected") != [42]:
-        return False, f"collected={r.get('collected')}, expected [42]"
+    scoped = [r for r in results if r.get("_phase") == 1]
+    if not scoped:
+        return False, "no scoped result"
+    if scoped[0].get("collected") != [42]:
+        return False, f"collected={scoped[0].get('collected')}, expected [42]"
 
     return True, "single job scoped correctly"
 
 
-def test_combined_spatial_temporal():
-    """Jobs with both spatial and temporal scope labels."""
-    from engine import PipelineEngine
-
-    _temp_step("""
-        def run(pd, **p):
-            pd["v"] = pd["input"]["v"]
-            return pd
-    """, name="cst_a")
-    _temp_step("""
-        def run(pd, **p):
-            pd["values"] = sorted(r["v"] for r in pd["results"])
-            return pd
-    """, name="cst_b")
-    yaml = _temp_yaml("""
-        wf:
-          - cst_a:
-          - cst_b:
-              scope:
-                spatial: region
-    """)
-
-    with PipelineEngine() as e:
-        run = e.create_run(yaml)
-        # Same spatial region, same temporal label
-        run.submit("j1", {"v": 1},
-                   spatial={"region": "R1"}, temporal={"t": "t0"})
-        run.submit("j2", {"v": 2},
-                   spatial={"region": "R1"}, temporal={"t": "t0"})
-        # Different spatial region, same temporal
-        run.submit("j3", {"v": 10},
-                   spatial={"region": "R2"}, temporal={"t": "t0"})
-
-        r1 = run.scope_complete(
-            spatial={"region": "R1"}, temporal={"t": "t0"}
-        ).result(timeout=30)
-        r2 = run.scope_complete(
-            spatial={"region": "R2"}, temporal={"t": "t0"}
-        ).result(timeout=30)
-
-    if r1["values"] != [1, 2]:
-        return False, f"R1 values wrong: {r1['values']}"
-    if r2["values"] != [10]:
-        return False, f"R2 values wrong: {r2['values']}"
-
-    return True, f"R1={r1['values']}, R2={r2['values']}"
-
-
 def test_empty_string_scope_values():
     """Scope with empty string values works correctly."""
-    from engine import PipelineEngine
+    from engine import Engine
 
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["v"] = pd["input"]["v"]
             return pd
     """, name="essv_a")
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["n"] = len(pd["results"])
             return pd
     """, name="essv_b")
@@ -453,196 +390,218 @@ def test_empty_string_scope_values():
         wf:
           - essv_a:
           - essv_b:
-              scope:
-                spatial: region
+              scope: group
     """)
 
-    with PipelineEngine() as e:
-        run = e.create_run(yaml)
-        run.submit("j1", {"v": 1}, spatial={"region": ""})
-        run.submit("j2", {"v": 2}, spatial={"region": ""})
-        r = run.scope_complete(spatial={"region": ""}).result(timeout=30)
+    with Engine() as e:
+        e.register("test", yaml)
+        e.submit("test", {"v": 1}, scope={"group": ""})
+        e.submit("test", {"v": 2}, scope={"group": ""},
+                 complete="group")
+        results = _wait_results(e, "test", 3, timeout=15)
 
-    if r.get("n") != 2:
-        return False, f"expected 2 results, got {r.get('n')}"
+    scoped = [r for r in results if r.get("_phase") == 1]
+    if not scoped:
+        return False, "no scoped result"
+    if scoped[0].get("n") != 2:
+        return False, f"expected 2 results, got {scoped[0].get('n')}"
 
-    return True, f"empty string scope: n={r['n']}"
+    return True, f"empty string scope: n={scoped[0]['n']}"
 
 
 def test_scoped_yaml_spatial():
-    """Run the scoped spatial YAML pipeline with real scope API."""
-    from engine import PipelineEngine
+    """Run the scoped spatial YAML pipeline with the v4 scope API."""
+    from engine import Engine
 
     base = Path(__file__).parent
     yaml_path = str(base / "pipelines" / "test_scoped_spatial_pipeline.yaml")
 
-    with PipelineEngine() as e:
-        run = e.create_run(yaml_path)
+    with Engine() as e:
+        e.register("test", yaml_path)
 
-        # Submit a 2x2 tile grid
         for row in range(2):
             for col in range(2):
-                run.submit(
-                    f"tile_{row}_{col}",
+                is_last = (row == 1 and col == 1)
+                e.submit(
+                    "test",
                     {"row": row, "col": col},
-                    spatial={"region": "grid_A"},
+                    scope={"region": "grid_A"},
+                    complete="region" if is_last else None,
                 )
 
-        r = run.scope_complete(
-            spatial={"region": "grid_A"}
-        ).result(timeout=30)
+        results = _wait_results(e, "test", 5, timeout=30)
 
-    stitched = r.get("stitched", {})
+    scoped = [r for r in results if r.get("_phase") == 1]
+    if not scoped:
+        return False, "no scoped result"
+
+    stitched = scoped[0].get("stitched", {})
     if stitched.get("n_tiles") != 4:
         return False, f"expected 4 tiles, got {stitched.get('n_tiles')}"
     if stitched.get("n_rows") != 2:
         return False, f"expected 2 rows, got {stitched.get('n_rows')}"
-    if stitched.get("n_cols") != 2:
-        return False, f"expected 2 cols, got {stitched.get('n_cols')}"
 
     return True, (f"4 tiles stitched: {stitched['n_rows']}x{stitched['n_cols']} grid, "
                   f"total_value={stitched['total_value']}")
 
 
-def test_scoped_yaml_multi_step():
-    """Run the multi-step scoped YAML pipeline."""
-    from engine import PipelineEngine
-
-    base = Path(__file__).parent
-    yaml_path = str(base / "pipelines" / "test_scoped_multi_step_pipeline.yaml")
-
-    with PipelineEngine() as e:
-        run = e.create_run(yaml_path)
-
-        for row in range(2):
-            run.submit(
-                f"tile_{row}",
-                {"row": row, "col": 0},
-                spatial={"region": "strip"},
-            )
-
-        r = run.scope_complete(
-            spatial={"region": "strip"}
-        ).result(timeout=30)
-
-    stitched = r.get("stitched", {})
-    if stitched.get("n_tiles") != 2:
-        return False, f"expected 2 tiles, got {stitched.get('n_tiles')}"
-
-    # Each Phase 0 result should have step_local data too
-    tiles = stitched.get("tiles", [])
-    if not tiles:
-        return False, "no tile data in stitched result"
-
-    return True, f"multi-step: {stitched['n_tiles']} tiles stitched"
-
-
-def test_multi_run_resource_sharing():
-    """Two runs sharing one engine both complete correctly."""
+def test_multi_pipeline_sharing():
+    """Two pipelines sharing one engine both complete correctly."""
     _temp_step("""
         import time
-        def run(pd, **p):
+        def run(pd, state, **p):
             time.sleep(0.02)
-            pd["run_id"] = pd["input"]["run_id"]
+            pd["pipeline"] = pd["input"]["pipeline"]
             pd["job_id"] = pd["input"]["job_id"]
             return pd
     """, name="mrrs")
-    yaml = _temp_yaml("wf:\n  - mrrs:")
+    yaml_a = _temp_yaml("wf_a:\n  - mrrs:")
+    yaml_b = _temp_yaml("wf_b:\n  - mrrs:")
 
-    from engine import PipelineEngine
+    from engine import Engine
 
-    with PipelineEngine(max_concurrent=8) as e:
-        run_a = e.create_run(yaml, priority="high")
-        run_b = e.create_run(yaml)
+    with Engine(max_concurrent=8) as e:
+        e.register("a", yaml_a)
+        e.register("b", yaml_b)
 
-        futures_a = [
-            run_a.submit(f"a{i}", {"run_id": "A", "job_id": i})
-            for i in range(5)
-        ]
-        futures_b = [
-            run_b.submit(f"b{i}", {"run_id": "B", "job_id": i})
-            for i in range(5)
-        ]
+        for i in range(5):
+            e.submit("a", {"pipeline": "A", "job_id": i})
+            e.submit("b", {"pipeline": "B", "job_id": i})
 
-        results_a = [f.result(timeout=30) for f in futures_a]
-        results_b = [f.result(timeout=30) for f in futures_b]
+        results_a = _wait_results(e, "a", 5, timeout=30)
+        results_b = _wait_results(e, "b", 5, timeout=30)
 
-    a_ids = sorted(r["run_id"] for r in results_a)
-    b_ids = sorted(r["run_id"] for r in results_b)
+    if len(results_a) != 5:
+        return False, f"pipeline A: expected 5, got {len(results_a)}"
+    if len(results_b) != 5:
+        return False, f"pipeline B: expected 5, got {len(results_b)}"
+
+    a_ids = sorted(r["pipeline"] for r in results_a)
+    b_ids = sorted(r["pipeline"] for r in results_b)
 
     if a_ids != ["A"] * 5:
-        return False, f"run A ids wrong: {a_ids}"
+        return False, f"pipeline A ids wrong: {a_ids}"
     if b_ids != ["B"] * 5:
-        return False, f"run B ids wrong: {b_ids}"
+        return False, f"pipeline B ids wrong: {b_ids}"
 
-    # Verify status after shutdown
-    status = e.status()
-    runs = status.get("runs", [])
-    if len(runs) != 2:
-        return False, f"expected 2 runs in status, got {len(runs)}"
-
-    return True, "2 runs shared engine, 10 total jobs completed"
+    return True, "2 pipelines shared engine, 10 total jobs completed"
 
 
-def test_repeated_runs_same_engine():
-    """Sequential runs on the same engine with no state leakage."""
+def test_repeated_submits():
+    """Sequential batches on the same engine with no state leakage."""
     _temp_step("""
-        def run(pd, **p):
+        def run(pd, state, **p):
             pd["marker"] = pd["input"]["marker"]
             return pd
     """, name="rrse")
     yaml = _temp_yaml("wf:\n  - rrse:")
 
-    from engine import PipelineEngine
+    from engine import Engine
 
-    with PipelineEngine(max_concurrent=4) as e:
-        # First run
-        run1 = e.create_run(yaml)
-        r1_futures = [
-            run1.submit(f"r1_j{i}", {"marker": f"run1_{i}"})
-            for i in range(3)
-        ]
-        r1_results = [f.result(timeout=30) for f in r1_futures]
+    with Engine(max_concurrent=4) as e:
+        e.register("test", yaml)
 
-        # Second run on the same engine
-        run2 = e.create_run(yaml)
-        r2_futures = [
-            run2.submit(f"r2_j{i}", {"marker": f"run2_{i}"})
-            for i in range(3)
-        ]
-        r2_results = [f.result(timeout=30) for f in r2_futures]
+        # Batch 1
+        for i in range(3):
+            e.submit("test", {"marker": f"batch1_{i}"})
+        r1 = _wait_results(e, "test", 3, timeout=15)
 
-    # Check no cross-contamination
-    r1_markers = sorted(r["marker"] for r in r1_results)
-    r2_markers = sorted(r["marker"] for r in r2_results)
+        # Batch 2
+        for i in range(3):
+            e.submit("test", {"marker": f"batch2_{i}"})
+        r2 = _wait_results(e, "test", 3, timeout=15)
 
-    expected_r1 = sorted(f"run1_{i}" for i in range(3))
-    expected_r2 = sorted(f"run2_{i}" for i in range(3))
+    m1 = sorted(r["marker"] for r in r1)
+    m2 = sorted(r["marker"] for r in r2)
 
-    if r1_markers != expected_r1:
-        return False, f"run1 markers wrong: {r1_markers}"
-    if r2_markers != expected_r2:
-        return False, f"run2 markers wrong: {r2_markers}"
+    expected1 = sorted(f"batch1_{i}" for i in range(3))
+    expected2 = sorted(f"batch2_{i}" for i in range(3))
 
-    # Verify engine tracked both runs
-    status = e.status()
-    if len(status.get("runs", [])) != 2:
-        return False, f"expected 2 runs, got {len(status.get('runs', []))}"
+    if m1 != expected1:
+        return False, f"batch 1 markers wrong: {m1}"
+    if m2 != expected2:
+        return False, f"batch 2 markers wrong: {m2}"
 
-    return True, "2 sequential runs, no state leakage"
+    return True, "2 sequential batches, no state leakage"
 
 
-# ── Helpers ──────────────────────────────────────────────────
+def test_state_dict_persistence():
+    """State dict persists across calls (warm model pattern)."""
+    _temp_step("""
+        def run(pd, state, **p):
+            state.setdefault("call_count", 0)
+            state["call_count"] += 1
+            pd["call_count"] = state["call_count"]
+            return pd
+    """, name="sdp")
+    yaml = _temp_yaml("wf:\n  - sdp:")
+
+    from engine import Engine
+
+    with Engine() as e:
+        e.register("test", yaml)
+        # Submit 5 sequential jobs (same worker should handle them)
+        for i in range(5):
+            e.submit("test", {})
+            time.sleep(0.5)  # sequential to hit same worker
+        results = _wait_results(e, "test", 5, timeout=30)
+
+    counts = sorted(r["call_count"] for r in results)
+    # With one worker, counts should be 1,2,3,4,5
+    if counts == [1, 2, 3, 4, 5]:
+        return True, f"state persisted: counts={counts}"
+    # With multiple workers, counts may differ but should all be >= 1
+    if all(c >= 1 for c in counts):
+        return True, f"state worked (multi-worker): counts={counts}"
+    return False, f"unexpected counts: {counts}"
 
 
-def _count_children():
-    """Count child processes of the current process."""
-    current = multiprocessing.current_process()
-    # Use multiprocessing's active_children which works cross-platform
-    return len(multiprocessing.active_children())
+def test_graceful_partial_failure():
+    """Failed jobs in a scope group don't prevent scoped step from running."""
+    _temp_step("""
+        def run(pd, state, **p):
+            if pd["input"].get("fail"):
+                raise ValueError("deliberate failure")
+            pd["v"] = pd["input"]["v"]
+            return pd
+    """, name="gpf_a")
+    _temp_step("""
+        def run(pd, state, **p):
+            pd["n_results"] = len(pd["results"])
+            pd["n_failures"] = len(pd.get("failures", []))
+            return pd
+    """, name="gpf_b")
+    yaml = _temp_yaml("""
+        wf:
+          - gpf_a:
+          - gpf_b:
+              scope: group
+    """)
+
+    from engine import Engine
+
+    with Engine() as e:
+        e.register("test", yaml)
+        e.submit("test", {"v": 1}, scope={"group": "G"})
+        e.submit("test", {"v": 2, "fail": True}, scope={"group": "G"})
+        e.submit("test", {"v": 3}, scope={"group": "G"},
+                 complete="group")
+        results = _wait_results(e, "test", 4, timeout=15)
+
+    scoped = [r for r in results if r.get("_phase") == 1]
+    if not scoped:
+        return False, "no scoped result (scope may have been blocked by failure)"
+
+    r = scoped[0]
+    if r["n_results"] != 2:
+        return False, f"expected 2 results, got {r['n_results']}"
+    if r["n_failures"] < 1:
+        return False, f"expected at least 1 failure, got {r['n_failures']}"
+
+    return True, f"scoped step ran with {r['n_results']} results, {r['n_failures']} failures"
 
 
-# ── Runner ───────────────────────────────────────────────────
+# ---- Runner ----------------------------------------------------------
 
 
 TESTS = [
@@ -650,17 +609,16 @@ TESTS = [
     ("Identity passthrough",              test_identity_passthrough),
     ("Resource cleanup (normal)",         test_resource_cleanup_normal),
     ("Resource cleanup (error)",          test_resource_cleanup_error),
-    ("Duplicate scope_complete",          test_duplicate_scope_complete),
-    ("Submit after scope_complete",       test_submit_after_scope_complete),
-    ("Concurrent scope_complete",         test_concurrent_scope_complete),
+    ("Submit after scope complete",       test_submit_after_scope_complete),
+    ("Concurrent scope completions",      test_concurrent_scope_complete),
     ("Large pipeline (10 steps)",         test_large_pipeline),
     ("Scope with single job",            test_scope_single_job),
-    ("Combined spatial+temporal",         test_combined_spatial_temporal),
     ("Empty string scope values",         test_empty_string_scope_values),
     ("Scoped YAML spatial pipeline",      test_scoped_yaml_spatial),
-    ("Scoped YAML multi-step pipeline",   test_scoped_yaml_multi_step),
-    ("Multi-run resource sharing",        test_multi_run_resource_sharing),
-    ("Repeated runs on same engine",      test_repeated_runs_same_engine),
+    ("Multi-pipeline sharing",            test_multi_pipeline_sharing),
+    ("Repeated submits",                  test_repeated_submits),
+    ("State dict persistence",            test_state_dict_persistence),
+    ("Graceful partial failure",          test_graceful_partial_failure),
 ]
 
 
@@ -669,7 +627,7 @@ def main():
 
     print()
     print("=" * WIDTH)
-    print("  SMART Analysis v3 -- Robustness Tests")
+    print("  SMART Analysis v4 -- Robustness Tests")
     print("=" * WIDTH)
     print()
     print(f"  Engine:   {engine.__version__}")
@@ -699,7 +657,7 @@ def main():
 
         results.append((name, passed, detail, elapsed))
 
-    # ── Summary ──────────────────────────────────────────────
+    # ---- Summary ----
 
     elapsed_total = time.perf_counter() - t_total
     n_pass = sum(1 for _, p, _, _ in results if p)

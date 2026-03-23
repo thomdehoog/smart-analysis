@@ -8,11 +8,10 @@ Applies Gaussian smoothing and CLAHE normalization.
 METADATA = {
     "description": "Load and preprocess image",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import numpy as np
     from skimage.filters import gaussian
     from skimage.exposure import equalize_adapthist

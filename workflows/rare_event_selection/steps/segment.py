@@ -7,11 +7,10 @@ Reads preprocessed image from pipeline_data, returns label masks.
 METADATA = {
     "description": "Cellpose v4 CPSAM segmentation",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     from cellpose import models
 
     verbose = pipeline_data["metadata"].get("verbose", 0)

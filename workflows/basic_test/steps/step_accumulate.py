@@ -8,11 +8,10 @@ a total sum. Used for testing scoped aggregation behavior.
 METADATA = {
     "description": "Sum 'value' key across accumulated results",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     verbose = pipeline_data.get("metadata", {}).get("verbose", 0)
 
     results = pipeline_data.get("results", [])

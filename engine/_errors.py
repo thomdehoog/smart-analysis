@@ -1,21 +1,17 @@
 """
 Exception hierarchy for the pipeline engine.
 
-Two independent hierarchies cover all error cases:
-
     WorkerError (base for all subprocess issues)
-    ├── WorkerSpawnError      — subprocess failed to start or connect
-    ├── WorkerCrashedError    — subprocess died during execution
-    └── StepExecutionError    — step's run() raised an exception
-                                (includes .remote_traceback from subprocess)
+    +-- WorkerSpawnError      subprocess failed to start or connect
+    +-- WorkerCrashedError    subprocess died during execution
+    +-- StepExecutionError    step's run() raised an exception
+                              (includes .remote_traceback from subprocess)
 
-    ScopeError                — invalid scope configuration or completion
+    ScopeError                invalid scope configuration or completion
 
-Important behavioral note: local (in-process) steps propagate their original
-exception type directly — they do NOT wrap in StepExecutionError. This means
-catching StepExecutionError only covers isolated steps. Callers that need to
-handle both local and isolated errors should catch the original type OR
-StepExecutionError, or catch Exception as a catch-all.
+All step execution goes through worker subprocesses. StepExecutionError
+covers any step failure. WorkerSpawnError and WorkerCrashedError cover
+infrastructure issues with the subprocess itself.
 """
 
 

@@ -5,11 +5,10 @@ Test step -- runs locally (no environment switching).
 METADATA = {
     "description": "Test step - runs locally",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import sys
     import os
 
@@ -28,8 +27,7 @@ def run(pipeline_data: dict, **params) -> dict:
 
     pipeline_data["step_local"] = {
         "executed": True,
-        "environment": "local",
-        "environment_name": env_name,
+            "environment_name": env_name,
         "python_executable": sys.executable,
         "process_id": os.getpid(),
         "params_used": params,

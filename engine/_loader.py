@@ -1,28 +1,15 @@
 """
-Step loading and METADATA extraction.
+Step METADATA extraction via AST parsing.
 
-Two independent operations for the pipeline engine:
+Reads a step file's METADATA dict without executing any code. Used by the
+engine at register() time to determine execution requirements for each step.
 
-1. get_step_settings(step_path) — Reads a step file's METADATA dict via AST
-   parsing. No code is executed. Used by the engine to decide WHERE to run
-   a step (which environment, which device).
-
-2. load_function(func_name, functions_dir) — Loads a step module via exec()
-   for in-process execution. Only called for steps that run locally
-   (needs_isolation == False). Uses exec instead of importlib to avoid
-   Windows DLL search path issues with PyTorch on network drives.
-
-Architecture note
------------------
-These two operations are deliberately separate. Routing (get_step_settings)
-must never execute module code, because the step may require packages only
-available in a remote conda environment. Execution (load_function) only
-happens after routing confirms the step runs in the current process.
+The engine never imports or executes step files. All step execution happens
+in worker subprocesses running in the correct conda environment.
 """
 
 import ast
 import logging
-import types
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -32,22 +19,25 @@ def get_step_settings(step_path: Path) -> dict:
     """
     Extract execution settings from a step file without running it.
 
-    Parses the file's AST to read the METADATA dict literal,
-    avoiding execution of module-level code (imports, side effects).
+    Parses the file's AST to read the METADATA dict literal.
+    No module code is executed.
 
     Returns
     -------
     dict
-        - environment: "local" or conda environment name
-        - device: "gpu" or "cpu"
+        - environment : str or None
+            Conda environment name. None means orchestrator's environment.
+        - max_workers : int
+            Maximum parallel workers for this step. Default 1.
     """
     metadata = _extract_metadata(step_path) or {}
     settings = {
-        "environment": metadata.get("environment", "local"),
-        "device": metadata.get("device", "cpu"),
+        "environment": metadata.get("environment", None),
+        "max_workers": metadata.get("max_workers", 1),
     }
-    logger.debug("Step settings for %s: environment=%s, device=%s",
-                 step_path.name, settings["environment"], settings["device"])
+    logger.debug("Step settings for %s: environment=%s, max_workers=%d",
+                 step_path.name, settings["environment"],
+                 settings["max_workers"])
     return settings
 
 
@@ -68,29 +58,3 @@ def _extract_metadata(step_path: Path) -> dict:
 
     logger.debug("No METADATA found in %s, using defaults", step_path.name)
     return {}
-
-
-def load_function(func_name: str, functions_dir: Path):
-    """
-    Load a step module for in-process execution.
-
-    Uses exec-based loading instead of importlib to avoid
-    Windows DLL search path side effects with PyTorch.
-    """
-    func_path = functions_dir / f"{func_name}.py"
-
-    if not func_path.exists():
-        raise FileNotFoundError(f"Function file not found: {func_path}")
-
-    logger.debug("Loading module '%s' via exec: %s", func_name, func_path)
-
-    namespace = {"__name__": func_name, "__file__": str(func_path)}
-    with open(func_path) as f:
-        exec(compile(f.read(), str(func_path), "exec"), namespace)
-
-    module = types.ModuleType(func_name)
-    module.__dict__.update(namespace)
-
-    logger.debug("Module '%s' loaded (has run=%s, has METADATA=%s)",
-                 func_name, hasattr(module, "run"), hasattr(module, "METADATA"))
-    return module

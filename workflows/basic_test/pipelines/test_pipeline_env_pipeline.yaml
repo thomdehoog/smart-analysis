@@ -6,7 +6,6 @@ metadata:
   version: "1.0"
   verbose: 3
   functions_dir: "../steps"
-  environment: "SMART--basic_test--env_b"
 
 pipeline-env-test:
   - step_local:
