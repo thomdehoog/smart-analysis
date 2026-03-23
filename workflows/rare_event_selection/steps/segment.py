@@ -7,6 +7,7 @@ Reads preprocessed image from pipeline_data, returns label masks.
 METADATA = {
     "description": "Cellpose v4 CPSAM segmentation",
     "version": "1.0",
+    "max_workers": 1,
 }
 
 
@@ -19,8 +20,10 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
 
     img_pre = pipeline_data["preprocess"]["image_preprocessed"]
 
-    model = models.CellposeModel(gpu=gpu)
-    masks, flows, styles = model.eval(img_pre, diameter=diameter)
+    # Warm model: load once, reuse across calls
+    if "model" not in state:
+        state["model"] = models.CellposeModel(gpu=gpu)
+    masks, flows, styles = state["model"].eval(img_pre, diameter=diameter)
 
     n_cells = int(masks.max())
 
