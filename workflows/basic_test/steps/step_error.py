@@ -7,11 +7,10 @@ Used to test that the engine handles step failures gracefully.
 METADATA = {
     "description": "Test step that raises an error",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     verbose = pipeline_data["metadata"].get("verbose", 0)
 
     if verbose >= 2:

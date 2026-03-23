@@ -7,11 +7,10 @@ Used to measure scope collection and aggregation performance.
 
 METADATA = {
     "description": "Scope aggregation benchmark",
-    "environment": "local",
 }
 
 
-def run(pipeline_data, **params):
+def run(pipeline_data, state, **params):
     import time
 
     t0 = time.monotonic()

@@ -12,7 +12,7 @@ METADATA = {
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import sys
     import os
 

@@ -8,12 +8,13 @@ Usage:
 """
 
 import sys
+import time
 import argparse
 from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from engine import run_pipeline
+from engine import Engine
 
 
 YAML_PATH = Path(__file__).parent / "pipelines/rare_event_selection_pipeline.yaml"
@@ -40,11 +41,25 @@ def main():
     print(f"Source: {args.source}")
     print()
 
-    result = run_pipeline(
-        yaml_path=str(YAML_PATH),
-        label=args.label,
-        input_data={"data_source": args.source},
-    )
+    with Engine() as engine:
+        engine.register("analysis", str(YAML_PATH))
+        engine.submit("analysis", {"data_source": args.source})
+
+        # Poll for results
+        while True:
+            results = engine.results("analysis")
+            if results:
+                break
+            status = engine.status("analysis")
+            if status["failed"] > 0:
+                print("Pipeline failed:")
+                for f in status["failures"]:
+                    print(f"  Step: {f['step']}")
+                    print(f"  Error: {f['error']}")
+                sys.exit(1)
+            time.sleep(0.5)
+
+    result = results[0]
 
     print()
     print("=" * 60)

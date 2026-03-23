@@ -7,11 +7,10 @@ Used to verify data survives environment switching and serialization.
 METADATA = {
     "description": "Write test data for verification",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import os
     import sys
 

@@ -7,11 +7,10 @@ serialization overhead at scope boundaries and env crossings.
 
 METADATA = {
     "description": "Data generation benchmark",
-    "environment": "local",
 }
 
 
-def run(pipeline_data, **params):
+def run(pipeline_data, state, **params):
     import time
 
     n_items = params.get("n_items", 100)

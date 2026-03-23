@@ -8,11 +8,10 @@ to function correctly even when a step mutates metadata.
 METADATA = {
     "description": "Tamper with metadata to test resilience",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import os
     import sys
 

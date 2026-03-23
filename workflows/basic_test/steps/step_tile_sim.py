@@ -8,11 +8,10 @@ coordinates and a computed value. For testing scoped spatial pipelines.
 METADATA = {
     "description": "Simulate tile processing with row/col",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import os
     import sys
 

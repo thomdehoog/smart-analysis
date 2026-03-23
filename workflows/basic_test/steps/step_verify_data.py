@@ -8,11 +8,10 @@ Reports pass/fail for each field.
 METADATA = {
     "description": "Verify test data after env switch",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import os
     import sys
 

@@ -1,70 +1,47 @@
 """
-Run — Pipeline run with phased execution and scope tracking.
+Internal pipeline state and YAML parsing.
 
-A Run represents one analysis pipeline configuration that processes multiple
-jobs through phases separated by scope boundaries.
+Not part of the public API. Used by the Engine to manage registered
+pipelines, track jobs, handle scope completion, and accumulate results.
 
 Phases
 ------
 A pipeline's step list is split into phases at scope boundaries:
 
-    Phase 0 (immediate):   preprocess → segment     [runs per job]
-    ── scope: spatial ──
-    Phase 1 (scoped):      stitch → features         [runs once per spatial group]
-    ── scope: temporal ──
-    Phase 2 (scoped):      normalize                  [runs once per temporal group]
+    Phase 0 (immediate):   preprocess -> segment     [runs per job]
+    -- scope: group --
+    Phase 1 (scoped):      stitch -> features         [runs once per group]
+    -- scope: all --
+    Phase 2 (scoped):      normalize                   [runs once for all]
 
-Phase 0 has no scope trigger — it runs immediately when a job is submitted.
-Subsequent phases wait for scope_complete() to fire.
+Phase 0 has no scope trigger -- it runs immediately when a job is submitted.
+Subsequent phases wait for scope completion signals.
 
-Data flow at scope boundaries
------------------------------
-Phase 0 produces one pipeline_data per job. When scope_complete() is called,
-the engine:
-  1. Waits for all Phase 0 jobs in the scope group to finish
-  2. Collects their results into a list (submission order preserved)
-  3. Passes {"results": [...], "metadata": {...}} to Phase 1's first step
+Scope matching
+--------------
+When complete="X" is signaled from a submit with scope={"X": val}:
+  - If "X" is a key in jobs' scope dicts: match by value (scope["X"] == val)
+  - If "X" is not a key: collect everything from the previous phase
 
-Phase 1 produces one result per scope group. Phase 2 collects all Phase 1
-results when its scope completes. Scope only narrows — once data is
-aggregated, it stays aggregated.
-
-Lifecycle
----------
-    run = engine.create_run("pipeline.yaml", priority=1)
-    run.submit("tile_1", data, spatial={"region": "R3"}, temporal={"t": "0"})
-    run.submit("tile_2", data, spatial={"region": "R3"}, temporal={"t": "0"})
-    future = run.scope_complete(spatial={"region": "R3"}, temporal={"t": "0"})
-    result = future.result()
-
-Thread safety
--------------
-- _lock protects _job_entries, _pending_results, _phase_results, _all_futures
-- Phase execution runs in the engine's ThreadPoolExecutor
-- Futures synchronize job completion before scope collection
+This means "all" is not special -- it works because no job has "all" as a
+scope key, so the engine collects everything.
 """
 
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
-
-from ._errors import ScopeError
-
-if TYPE_CHECKING:
-    from ._pipeline import PipelineEngine
 
 logger = logging.getLogger(__name__)
 
 
-# ── Data structures ──────────────────────────────────────────────
+# -- Data structures ---------------------------------------------------
 
 
 @dataclass
@@ -78,43 +55,10 @@ class StepConfig:
 class Phase:
     """A group of sequential steps with an optional scope trigger."""
     steps: list
-    scope: dict | None = None
+    scope: str | None = None
 
 
-@dataclass
-class _Job:
-    """Internal: a submitted job with its scope labels."""
-    label: str
-    input_data: dict
-    spatial: dict = field(default_factory=dict)
-    temporal: dict = field(default_factory=dict)
-
-
-# ── Helpers ──────────────────────────────────────────────────────
-
-
-def _make_scope_key(spatial, temporal):
-    """Create a hashable key from scope label dicts."""
-    items = []
-    for k, v in sorted(spatial.items()):
-        items.append(("spatial", k, v))
-    for k, v in sorted(temporal.items()):
-        items.append(("temporal", k, v))
-    return tuple(items)
-
-
-def _scope_triggers(phase_scope, spatial, temporal):
-    """Check if scope_complete args match a phase's trigger scope.
-
-    A phase with scope {"spatial": "region"} triggers when the
-    scope_complete call includes a spatial dict with key "region".
-    """
-    for axis, name in phase_scope.items():
-        if axis == "spatial" and name not in (spatial or {}):
-            return False
-        if axis == "temporal" and name not in (temporal or {}):
-            return False
-    return True
+# -- YAML parsing ------------------------------------------------------
 
 
 def parse_yaml(yaml_path):
@@ -180,341 +124,196 @@ def split_phases(steps_config):
     return phases
 
 
-# ── Run ──────────────────────────────────────────────────────────
+# -- Pipeline state ----------------------------------------------------
 
 
-class Run:
+class PipelineState:
     """
-    A pipeline run with scope tracking and result accumulation.
+    Internal state for one registered pipeline.
 
-    Parameters
-    ----------
-    engine : PipelineEngine
-        Parent engine (provides executor and step execution).
-    yaml_path : str or Path
-        Path to the pipeline YAML file.
-    priority : int
-        Priority level. Higher = more urgent. 0 = default (FIFO).
+    Tracks jobs, scope groups, result accumulation, and status counters.
+    Thread-safe: all mutable state is protected by _lock.
     """
 
-    def __init__(self, engine: PipelineEngine, yaml_path, priority=0):
-        self._engine = engine
-        self._yaml_path = Path(yaml_path)
-        self._priority = priority
+    def __init__(self, name, yaml_path, phases, functions_dir,
+                 step_settings, verbose):
+        self.name = name
+        self.yaml_path = Path(yaml_path)
+        self.phases = phases
+        self.functions_dir = functions_dir
+        self.step_settings = step_settings
+        self.verbose = verbose
+        self.workflow_name = name
+
         self._lock = threading.Lock()
-
-        # Parse YAML
-        self._workflow_name, steps_config, self._yaml_meta = parse_yaml(
-            yaml_path)
-        functions_dir_str = self._yaml_meta.get("functions_dir", "../steps")
-        self._functions_dir = (
-            self._yaml_path.parent / functions_dir_str
-        ).resolve()
-        self._isolation = self._yaml_meta.get("isolation", "minimal")
-        self._pipeline_env = self._yaml_meta.get("environment")
-        self._verbose = self._yaml_meta.get("verbose", 0)
-        self._phases = split_phases(steps_config)
-
-        # Job tracking: (future, scope_key, submission_index)
-        self._job_entries = []
         self._submission_counter = 0
 
-        # Phase 0 result accumulation: scope_key -> [(index, pipeline_data), ...]
-        self._pending_results = defaultdict(list)
+        # Job tracking: [(future, scope_dict, submission_idx)]
+        self._job_entries = []
 
-        # Phase N>0 result accumulation: phase_idx -> [pipeline_data, ...]
+        # Phase 0 results: [(submission_idx, scope_dict, result)]
+        self._phase0_results = []
+
+        # Phase N>0 results: phase_idx -> [result]
         self._phase_results = defaultdict(list)
 
-        # Status counters (no future references held — avoids memory leak)
+        # Completed results queue (drained by engine.results())
+        self._results_queue = queue.Queue()
+
+        # Status counters
         self._n_submitted = 0
         self._n_completed = 0
         self._n_failed = 0
+        self._failures = []
 
-        logger.info("Run created: %s, workflow=%s, %d phases, priority=%d",
-                     self._yaml_path.name, self._workflow_name,
-                     len(self._phases), self._priority)
-
-    def submit(self, label, input_data=None, spatial=None, temporal=None):
-        """
-        Submit a job for processing. Non-blocking.
-
-        Phase 0 steps execute immediately in the engine's thread pool.
-        If the pipeline has no scopes, all steps run and the future
-        resolves with the final result.
-
-        Parameters
-        ----------
-        label : str
-            Human-readable label for this job.
-        input_data : dict, optional
-            Input data for the pipeline.
-        spatial : dict, optional
-            Spatial scope labels, e.g. {"region": "R3"}.
-        temporal : dict, optional
-            Temporal scope labels, e.g. {"timepoint": "t0"}.
-
-        Returns
-        -------
-        concurrent.futures.Future
-            Resolves with the Phase 0 result (or final result if no scopes).
-        """
-        job = _Job(
-            label=label,
-            input_data=input_data if input_data is not None else {},
-            spatial=spatial or {},
-            temporal=temporal or {},
-        )
-        scope_key = _make_scope_key(job.spatial, job.temporal)
-
+    def next_submission_idx(self):
+        """Get the next submission index (thread-safe)."""
         with self._lock:
-            submission_idx = self._submission_counter
+            idx = self._submission_counter
             self._submission_counter += 1
-
-        logger.info("Job submitted: %s (scope_key=%s, idx=%d)",
-                     label, scope_key, submission_idx)
-
-        future = self._engine._executor.submit(
-            self._execute_phase_for_job, 0, job, submission_idx,
-        )
-        future.add_done_callback(self._on_future_done)
-        with self._lock:
-            self._job_entries.append((future, scope_key))
             self._n_submitted += 1
+            return idx
 
-        return future
-
-    def scope_complete(self, spatial=None, temporal=None):
-        """
-        Signal scope completion. Triggers the matching scoped phase.
-
-        Waits for all jobs in the scope group to finish Phase 0, collects
-        their results, and executes the triggered phase. Non-blocking —
-        returns a future that resolves with the phase result.
-
-        Parameters
-        ----------
-        spatial : dict, optional
-            Spatial scope keys, e.g. {"region": "R3"}.
-        temporal : dict, optional
-            Temporal scope keys, e.g. {"session": "S1"}.
-
-        Returns
-        -------
-        concurrent.futures.Future
-        """
-        spatial = spatial or {}
-        temporal = temporal or {}
-
-        logger.info("scope_complete: spatial=%s, temporal=%s",
-                     spatial, temporal)
-
-        future = self._engine._executor.submit(
-            self._handle_scope_complete, spatial, temporal,
-        )
-        future.add_done_callback(self._on_future_done)
+    def add_job_entry(self, future, scope, submission_idx):
+        """Record a submitted job's future and scope."""
         with self._lock:
-            self._n_submitted += 1
-        return future
+            self._job_entries.append((future, scope, submission_idx))
 
-    def _handle_scope_complete(self, spatial, temporal):
-        """Wait for pending jobs, collect results, run triggered phase.
+    def store_phase0_result(self, submission_idx, scope, result):
+        """Store a Phase 0 result for later scope collection."""
+        with self._lock:
+            self._phase0_results.append((submission_idx, scope, result))
 
-        Matching uses subset semantics: a job matches if its scope labels
-        are all covered by the scope_complete arguments. Extra keys in
-        scope_complete are tolerated (the job's key must be a subset of
-        the complete key, not an exact match).
-        """
-        # Find which phase is triggered
-        triggered = None
-        for i, phase in enumerate(self._phases):
-            if phase.scope is not None and _scope_triggers(
-                    phase.scope, spatial, temporal):
-                triggered = i
-                break
+    def publish_result(self, result, phase_idx, scope, scope_level):
+        """Put a completed result in the results queue."""
+        result["_phase"] = phase_idx
+        result["_scope"] = scope
+        result["_scope_level"] = scope_level
+        self._results_queue.put(result)
 
-        if triggered is None:
-            raise ScopeError(
-                f"No phase matches scope_complete("
-                f"spatial={spatial}, temporal={temporal})"
-            )
-
-        prev_phase = triggered - 1
-        complete_key = set(_make_scope_key(spatial, temporal))
-
-        if prev_phase == 0:
-            # Wait for all Phase 0 jobs whose scope labels are covered
-            matching_futures = []
-            with self._lock:
-                for future, key in self._job_entries:
-                    if set(key).issubset(complete_key):
-                        matching_futures.append(future)
-
-            if not matching_futures:
-                raise ScopeError(
-                    f"No jobs submitted matching scope_complete("
-                    f"spatial={spatial}, temporal={temporal})")
-
-            for f in matching_futures:
-                f.result()  # blocks until complete; raises on failure
-
-            # Collect results from all matching scope groups
-            with self._lock:
-                indexed = []
-                consumed_keys = []
-                for k, entries in self._pending_results.items():
-                    if set(k).issubset(complete_key):
-                        indexed.extend(entries)
-                        consumed_keys.append(k)
-                for k in consumed_keys:
-                    del self._pending_results[k]
-
-                # Clean up consumed job entries
-                matching_set = set(id(f) for f in matching_futures)
-                self._job_entries = [
-                    (f, k) for f, k in self._job_entries
-                    if id(f) not in matching_set
-                ]
-
-            # Sort by submission index to preserve submission order
-            indexed.sort(key=lambda item: item[0])
-            results = [data for _, data in indexed]
-        else:
-            # Collect from previous scoped phase: take all results
-            with self._lock:
-                results = list(self._phase_results[prev_phase])
-                self._phase_results[prev_phase].clear()
-
-        if not results:
-            raise ScopeError(
-                f"No results accumulated for phase {triggered}")
-
-        logger.info("Phase %d triggered with %d results",
-                     triggered, len(results))
-        return self._execute_phase_with_results(triggered, results)
-
-    def _execute_phase_for_job(self, phase_idx, job, submission_idx=0):
-        """Execute Phase 0 steps for one job."""
-        phase = self._phases[phase_idx]
-
-        def _engine_log(msg):
-            if self._verbose in (1, 3):
-                print(msg)
-
-        pipeline_data = {
-            "metadata": {
-                "label": job.label,
-                "datetime": datetime.now().strftime("%Y%m%d-%H%M%S"),
-                "workflow_name": self._workflow_name,
-                "yaml_filename": self._yaml_path.name,
-                "steps": [s.name for s in phase.steps],
-                "verbose": self._verbose,
-                **{k: v for k, v in self._yaml_meta.items()
-                   if k not in ("verbose", "functions_dir", "environment",
-                                "isolation")},
-            },
-            "input": job.input_data,
-        }
-
-        _engine_log(f"[engine] Job: {job.label}")
-
-        for step_idx, step in enumerate(phase.steps, start=1):
-            _engine_log(
-                f"[engine]   Step {step_idx}/{len(phase.steps)}: {step.name}")
-
-            pipeline_data = self._engine._execute_step(
-                step, pipeline_data, self._functions_dir,
-                self._priority, self._isolation, self._pipeline_env,
-            )
-            if not isinstance(pipeline_data, dict):
-                raise TypeError(
-                    f"Step '{step.name}' returned "
-                    f"{type(pipeline_data).__name__}, expected dict"
-                )
-
-        # Accumulate for next phase if it has a scope trigger
-        next_phase = phase_idx + 1
-        if next_phase < len(self._phases) and self._phases[next_phase].scope is not None:
-            scope_key = _make_scope_key(job.spatial, job.temporal)
-            with self._lock:
-                self._pending_results[scope_key].append(
-                    (submission_idx, pipeline_data))
-
-        return pipeline_data
-
-    def _execute_phase_with_results(self, phase_idx, accumulated_results):
-        """Execute a scoped phase with accumulated results."""
-        phase = self._phases[phase_idx]
-
-        def _engine_log(msg):
-            if self._verbose in (1, 3):
-                print(msg)
-
-        pipeline_data = {
-            "results": accumulated_results,
-            "metadata": {
-                "datetime": datetime.now().strftime("%Y%m%d-%H%M%S"),
-                "workflow_name": self._workflow_name,
-                "yaml_filename": self._yaml_path.name,
-                "steps": [s.name for s in phase.steps],
-                "phase": phase_idx,
-                "n_accumulated": len(accumulated_results),
-                "verbose": self._verbose,
-            },
-        }
-
-        _engine_log(f"[engine] Phase {phase_idx}: "
-                     f"{len(accumulated_results)} accumulated results")
-
-        for step_idx, step in enumerate(phase.steps, start=1):
-            _engine_log(
-                f"[engine]   Step {step_idx}/{len(phase.steps)}: {step.name}")
-
-            pipeline_data = self._engine._execute_step(
-                step, pipeline_data, self._functions_dir,
-                self._priority, self._isolation, self._pipeline_env,
-            )
-            if not isinstance(pipeline_data, dict):
-                raise TypeError(
-                    f"Step '{step.name}' returned "
-                    f"{type(pipeline_data).__name__}, expected dict"
-                )
-
-        # Store for next phase
-        if phase_idx + 1 < len(self._phases):
-            with self._lock:
-                self._phase_results[phase_idx].append(pipeline_data)
-
-        return pipeline_data
-
-    def _on_future_done(self, future):
-        """Callback for completed futures — updates counters without
-        holding references to the future object."""
+    def record_completion(self):
+        """Record that a job/phase completed successfully."""
         with self._lock:
             self._n_completed += 1
-            if future.exception() is not None:
-                self._n_failed += 1
+
+    def record_failure(self, scope, step_name, error_msg):
+        """Record a job failure."""
+        with self._lock:
+            self._n_failed += 1
+            self._failures.append({
+                "scope": scope,
+                "step": step_name,
+                "error": error_msg,
+            })
+
+    def get_triggered_phase_idx(self, level):
+        """Find the phase index triggered by a scope level."""
+        for i, phase in enumerate(self.phases):
+            if phase.scope == level:
+                return i
+        return None
+
+    def collect_for_scope(self, phase_idx, level, value):
+        """
+        Collect results from the previous phase for a triggered scope.
+
+        For Phase 1 (prev=0): collects from Phase 0 results.
+        For Phase N (prev=N-1): collects from phase_results[N-1].
+
+        Returns (results, failures) where results is a list sorted by
+        submission order and failures is a list of failure info dicts.
+        """
+        prev_idx = phase_idx - 1
+
+        with self._lock:
+            if prev_idx == 0:
+                return self._collect_phase0(level, value)
+            else:
+                results = list(self._phase_results[prev_idx])
+                self._phase_results[prev_idx].clear()
+                return results, []
+
+    def _collect_phase0(self, level, value):
+        """Collect Phase 0 results matching scope criteria.
+
+        Must be called under _lock.
+        """
+        if value is not None:
+            matching = []
+            remaining = []
+            for entry in self._phase0_results:
+                idx, scope, result = entry
+                if scope.get(level) == value:
+                    matching.append((idx, result))
+                else:
+                    remaining.append(entry)
+            self._phase0_results = remaining
+        else:
+            matching = [(idx, r) for idx, _, r in self._phase0_results]
+            self._phase0_results = []
+
+        matching.sort(key=lambda x: x[0])
+        results = [r for _, r in matching]
+
+        # Collect failures for matching scope
+        failures = []
+        remaining_failures = []
+        for f in self._failures:
+            if value is not None and f["scope"].get(level) == value:
+                failures.append(f)
+            elif value is None:
+                failures.append(f)
+            else:
+                remaining_failures.append(f)
+
+        return results, failures
+
+    def store_phase_result(self, phase_idx, result):
+        """Store a scoped phase result for the next phase."""
+        with self._lock:
+            self._phase_results[phase_idx].append(result)
+
+    def get_matching_futures(self, level, value):
+        """Get Phase 0 futures matching a scope level and value."""
+        with self._lock:
+            if value is not None:
+                return [
+                    f for f, scope, _ in self._job_entries
+                    if scope.get(level) == value
+                ]
+            else:
+                return [f for f, _, _ in self._job_entries]
+
+    def cleanup_consumed_entries(self, level, value):
+        """Remove consumed job entries after scope collection."""
+        with self._lock:
+            if value is not None:
+                self._job_entries = [
+                    (f, s, idx) for f, s, idx in self._job_entries
+                    if s.get(level) != value
+                ]
+            else:
+                self._job_entries = []
+
+    def drain_results(self):
+        """Drain and return all completed results."""
+        results = []
+        while True:
+            try:
+                results.append(self._results_queue.get_nowait())
+            except queue.Empty:
+                break
+        return results
 
     @property
     def status(self):
-        """Current run state for observability."""
+        """Current pipeline state for observability."""
         with self._lock:
-            pending_scope = {
-                str(k): len(v)
-                for k, v in self._pending_results.items()
+            return {
+                "pending": max(0, self._n_submitted - self._n_completed
+                               - self._n_failed),
+                "running": 0,  # approximation; exact would need future tracking
+                "completed": self._n_completed,
+                "failed": self._n_failed,
+                "failures": list(self._failures),
             }
-        return {
-            "yaml": self._yaml_path.name,
-            "workflow": self._workflow_name,
-            "priority": self._priority,
-            "isolation": self._isolation,
-            "phases": len(self._phases),
-            "total": self._n_submitted,
-            "completed": self._n_completed,
-            "failed": self._n_failed,
-            "pending_scope_groups": pending_scope,
-        }
-
-    def __repr__(self):
-        return (f"Run({self._yaml_path.name!r}, "
-                f"priority={self._priority}, "
-                f"phases={len(self._phases)})")

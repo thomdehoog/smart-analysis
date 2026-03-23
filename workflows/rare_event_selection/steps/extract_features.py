@@ -8,11 +8,10 @@ by a percentile threshold on a chosen feature.
 METADATA = {
     "description": "Feature extraction and cell selection",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import numpy as np
     from skimage.measure import regionprops_table
 

@@ -8,11 +8,10 @@ combines them into a stitched grid with dimensions and value totals.
 METADATA = {
     "description": "Stitch accumulated tile results into grid summary",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     verbose = pipeline_data.get("metadata", {}).get("verbose", 0)
 
     results = pipeline_data.get("results", [])

@@ -7,11 +7,10 @@ via the 'size' parameter. Used to measure engine overhead vs actual work.
 
 METADATA = {
     "description": "CPU workload benchmark",
-    "environment": "local",
 }
 
 
-def run(pipeline_data, **params):
+def run(pipeline_data, state, **params):
     import time
 
     size = params.get("size", 100)

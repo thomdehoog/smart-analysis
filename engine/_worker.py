@@ -1,13 +1,12 @@
 """
-Worker — Manages a subprocess for one conda environment.
-
-v3 change: workers are per-environment, not per-step. A single worker can
-execute any step file sent to it, with modules cached inside the subprocess
-for warm-start performance. The step path is sent with each execute() call
-rather than fixed at construction time.
+Worker -- Manages a subprocess for one conda environment.
 
 Spawns worker_script.py in the target conda environment and communicates
 via multiprocessing.connection (TCP sockets with pickle serialization).
+
+Workers are per-environment, not per-step. A single worker can execute any
+step file sent to it, with modules and state dicts cached inside the
+subprocess for warm-start performance.
 
 Lifecycle
 ---------
@@ -15,14 +14,7 @@ Lifecycle
    it to connect back. Uses authkey for secure handshake.
 2. execute(step_path, data, params): Send work, wait for response.
 3. shutdown(): Send None sentinel, wait for graceful exit. Escalates:
-   wait 5s → SIGTERM → wait 2s → SIGKILL.
-
-Two modes
----------
-- persistent (oneshot=False): Subprocess stays alive between execute()
-  calls, keeping imported modules warm in memory. Managed by WorkerPool.
-- oneshot (oneshot=True): Subprocess processes one request and exits.
-  Created and destroyed per call. No warmup benefit but no idle cost.
+   wait 5s -> SIGTERM -> wait 2s -> SIGKILL.
 
 Connection protocol
 -------------------
@@ -31,19 +23,15 @@ Connection protocol
 - Subprocess connects back as Client
 - Messages: (step_path, pipeline_data, params) via pickle
 - Shutdown sentinel: None (pickled)
-
-Error handling
---------------
-- WorkerSpawnError: subprocess failed to start or connect
-- WorkerCrashedError: subprocess died during execution
-- StepExecutionError: step's run() raised (includes remote traceback)
 """
 
+import collections
 import logging
 import os
 import pickle
 import subprocess
 import sys
+import threading
 import time
 from multiprocessing.connection import Listener
 from pathlib import Path
@@ -56,6 +44,46 @@ logger = logging.getLogger(__name__)
 ENGINE_DIR = Path(__file__).resolve().parent
 WORKER_SCRIPT = ENGINE_DIR / "worker_script.py"
 
+# Maximum bytes of stderr to retain for crash diagnostics.
+_STDERR_BUFFER = 8192
+
+
+class _StderrDrainer:
+    """Background thread that reads stderr so the pipe never fills.
+
+    Without draining, a worker that logs errors to stderr can fill the
+    OS pipe buffer (~4KB on Windows) and block permanently. This thread
+    reads continuously and keeps the last _STDERR_BUFFER bytes for crash
+    diagnostics.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._buf = collections.deque(maxlen=_STDERR_BUFFER)
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self):
+        try:
+            while True:
+                chunk = self._stream.read(1024)
+                if not chunk:
+                    break
+                self._buf.extend(chunk)
+        except (ValueError, OSError):
+            pass
+
+    def get_output(self):
+        """Return retained stderr as a string."""
+        return bytes(self._buf).decode("utf-8", errors="replace")
+
+    def close(self):
+        """Close the stream (unblocks the drain thread)."""
+        try:
+            self._stream.close()
+        except Exception:
+            pass
+
 
 class Worker:
     """
@@ -63,29 +91,25 @@ class Worker:
 
     Parameters
     ----------
-    environment : str
-        Conda environment name, or "local" for current Python.
-    device : str
-        "gpu" or "cpu". Used for status reporting; does not affect execution.
-    oneshot : bool
-        If True, subprocess exits after one execution.
+    environment : str or None
+        Conda environment name. None means the orchestrator's own
+        environment (uses sys.executable directly).
     idle_timeout : float
         Seconds of inactivity before eligible for reaper shutdown.
     connect_timeout : float
         Seconds to wait for the subprocess to connect back.
     """
 
-    def __init__(self, environment, device="cpu", oneshot=False,
-                 idle_timeout=300.0, connect_timeout=60.0):
+    def __init__(self, environment=None, idle_timeout=300.0,
+                 connect_timeout=60.0):
         self.environment = environment
-        self.device = device
-        self.oneshot = oneshot
         self.idle_timeout = idle_timeout
         self.connect_timeout = connect_timeout
 
         self._process = None
         self._conn = None
         self._listener = None
+        self._stderr_drainer = None
         self._last_active = time.monotonic()
         self._current_step = None
 
@@ -101,63 +125,59 @@ class Worker:
         port = self._listener.address[1]
         self._listener._listener._socket.settimeout(self.connect_timeout)
 
-        if self.environment.lower() == "local":
+        if self.environment is None:
             cmd = [sys.executable, str(WORKER_SCRIPT)]
         else:
             cmd = [CONDA_CMD, "run", "-n", self.environment,
                    "python", str(WORKER_SCRIPT)]
 
         cmd.extend(["--port", str(port), "--authkey", authkey.hex()])
-        if self.oneshot:
-            cmd.append("--oneshot")
 
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
 
-        # On Windows, isolate the worker in its own process group so that
-        # terminating it never sends CTRL_C_EVENT to the parent console.
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
-        logger.debug("Worker spawning: env=%s, device=%s, oneshot=%s, port=%d",
-                     self.environment, self.device, self.oneshot, port)
+        env_label = self.environment or "orchestrator"
+        logger.debug("Worker spawning: env=%s, port=%d", env_label, port)
 
         try:
             self._process = subprocess.Popen(
-                cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                **kwargs,
+                cmd, env=env, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, **kwargs,
             )
         except Exception as e:
-            logger.error("Worker spawn failed for env=%s: %s",
-                         self.environment, e)
+            logger.error("Worker spawn failed for env=%s: %s", env_label, e)
             self._cleanup()
             raise WorkerSpawnError(
-                f"Failed to start worker for '{self.environment}': {e}"
+                f"Failed to start worker for '{env_label}': {e}"
             ) from e
 
         logger.debug("Worker process started: pid=%d, env=%s",
-                     self._process.pid, self.environment)
+                     self._process.pid, env_label)
+
+        # Drain stderr in background so the pipe buffer never fills.
+        # Without this, a worker logging errors to stderr can block
+        # permanently after ~4KB of output (Windows pipe buffer size).
+        self._stderr_drainer = _StderrDrainer(self._process.stderr)
 
         try:
             self._conn = self._listener.accept()
         except Exception as e:
-            stderr = ""
-            if self._process.poll() is not None:
-                stderr = self._process.stderr.read().decode(
-                    "utf-8", errors="replace")
+            stderr = self._stderr_drainer.get_output() if self._stderr_drainer else ""
             logger.error("Worker connect failed: pid=%d, env=%s, stderr=%s",
-                         self._process.pid, self.environment, stderr[:500])
+                         self._process.pid, env_label, stderr[:500])
             self._cleanup()
             raise WorkerSpawnError(
-                f"Worker for '{self.environment}' failed to connect "
+                f"Worker for '{env_label}' failed to connect "
                 f"within {self.connect_timeout}s. stderr: {stderr}"
             ) from e
 
         self._last_active = time.monotonic()
-        logger.info("Worker ready: pid=%d, env=%s, device=%s, oneshot=%s",
-                     self._process.pid, self.environment,
-                     self.device, self.oneshot)
+        logger.info("Worker ready: pid=%d, env=%s",
+                     self._process.pid, env_label)
 
     def execute(self, step_path, pipeline_data, params, timeout=300.0):
         """
@@ -190,36 +210,37 @@ class Worker:
         message = (str(step_path), pipeline_data, params)
         try:
             data = pickle.dumps(message, protocol=2)
-            logger.debug("Worker execute: sending %d bytes to pid=%d (step=%s)",
-                         len(data), pid, step_name)
+            logger.debug("Worker execute: sending %d bytes to pid=%d "
+                         "(step=%s)", len(data), pid, step_name)
             self._conn.send_bytes(data)
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             logger.error("Worker send failed: pid=%d, step=%s: %s",
                          pid, step_name, e)
             self._cleanup()
+            env_label = self.environment or "orchestrator"
             raise WorkerCrashedError(
-                f"Worker for '{self.environment}' lost connection: {e}"
+                f"Worker for '{env_label}' lost connection: {e}"
             ) from e
 
         try:
             if not self._conn.poll(timeout=timeout):
-                logger.error("Worker timed out: pid=%d, step=%s, timeout=%.0fs",
-                             pid, step_name, timeout)
+                logger.error("Worker timed out: pid=%d, step=%s, "
+                             "timeout=%.0fs", pid, step_name, timeout)
                 self._cleanup()
+                env_label = self.environment or "orchestrator"
                 raise StepExecutionError(
-                    f"Worker for '{self.environment}' timed out after {timeout}s"
+                    f"Worker for '{env_label}' timed out after {timeout}s"
                 )
             raw = self._conn.recv_bytes()
         except (EOFError, ConnectionResetError, OSError) as e:
-            stderr = ""
-            if self._process and self._process.poll() is not None:
-                stderr = self._process.stderr.read().decode(
-                    "utf-8", errors="replace")
+            stderr = (self._stderr_drainer.get_output()
+                      if self._stderr_drainer else "")
             logger.error("Worker crashed: pid=%d, step=%s, stderr=%s",
                          pid, step_name, stderr[:500])
             self._cleanup()
+            env_label = self.environment or "orchestrator"
             raise WorkerCrashedError(
-                f"Worker for '{self.environment}' crashed. stderr: {stderr}"
+                f"Worker for '{env_label}' crashed. stderr: {stderr}"
             ) from e
 
         elapsed = time.monotonic() - t0
@@ -228,8 +249,9 @@ class Worker:
         self._current_step = None
 
         if not isinstance(response, tuple) or len(response) != 2:
+            env_label = self.environment or "orchestrator"
             raise WorkerCrashedError(
-                f"Worker for '{self.environment}' sent invalid response"
+                f"Worker for '{env_label}' sent invalid response"
             )
 
         status, payload = response
@@ -268,9 +290,9 @@ class Worker:
             state = "busy"
         else:
             state = "idle"
+        env_label = self.environment or "orchestrator"
         return {
-            "env": self.environment,
-            "device": self.device,
+            "env": env_label,
             "state": state,
             "current_step": self._current_step,
             "pid": self._process.pid if self._process else None,
@@ -280,8 +302,8 @@ class Worker:
         """Gracefully shut down the worker subprocess."""
         pid = self._process.pid if self._process else None
         if pid:
-            logger.debug("Worker shutdown: pid=%d, env=%s", pid,
-                         self.environment)
+            env_label = self.environment or "orchestrator"
+            logger.debug("Worker shutdown: pid=%d, env=%s", pid, env_label)
 
         if self._conn is not None:
             try:
@@ -305,7 +327,7 @@ class Worker:
         self._cleanup()
 
     def _cleanup(self):
-        """Close connection, listener, and process handles."""
+        """Close connection, listener, drainer, and process handles."""
         self._current_step = None
 
         if self._conn is not None:
@@ -322,12 +344,11 @@ class Worker:
                 pass
             self._listener = None
 
+        if self._stderr_drainer is not None:
+            self._stderr_drainer.close()
+            self._stderr_drainer = None
+
         if self._process is not None:
-            if self._process.stderr:
-                try:
-                    self._process.stderr.close()
-                except Exception:
-                    pass
             if self._process.poll() is None:
                 try:
                     self._process.kill()
@@ -336,5 +357,5 @@ class Worker:
             self._process = None
 
     def __repr__(self):
-        return (f"Worker(env={self.environment!r}, device={self.device!r}, "
-                f"alive={self.is_alive()})")
+        env_label = self.environment or "orchestrator"
+        return f"Worker(env={env_label!r}, alive={self.is_alive()})"

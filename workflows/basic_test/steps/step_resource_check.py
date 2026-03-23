@@ -8,11 +8,10 @@ Handles platform differences (Linux /proc/self/fd vs others).
 METADATA = {
     "description": "Report PID and file descriptors for cleanup tests",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import os
     import sys
     import platform

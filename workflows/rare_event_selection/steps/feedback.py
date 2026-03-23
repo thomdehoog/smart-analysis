@@ -8,11 +8,10 @@ of selected cells, readable by downstream programs.
 METADATA = {
     "description": "Write selected cell coordinates to JSON",
     "version": "1.0",
-    "environment": "local",
 }
 
 
-def run(pipeline_data: dict, **params) -> dict:
+def run(pipeline_data: dict, state: dict, **params) -> dict:
     import json
     import numpy as np
     from pathlib import Path
