@@ -21,11 +21,11 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent.parent
+ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 WIDTH = 70
-BASE = Path(__file__).parent
+BASE = Path(__file__).parent.parent
 
 
 # ---- Logging ---------------------------------------------------------
@@ -1251,7 +1251,7 @@ def main():
         log("-" * WIDTH)
         log("  Phase 3: Robustness tests")
         log("-" * WIDTH)
-        rob_ok = run_script(log, "robustness", BASE / "run_robustness.py")
+        rob_ok = run_script(log, "robustness", BASE / "tests" / "run_robustness.py")
         if not rob_ok:
             all_passed = False
         log()
@@ -1261,7 +1261,7 @@ def main():
         log("-" * WIDTH)
         log("  Phase 4: Devil tests (adversarial)")
         log("-" * WIDTH)
-        devil_ok = run_script(log, "devil", BASE / "run_devil.py")
+        devil_ok = run_script(log, "devil", BASE / "tests" / "run_devil.py")
         if not devil_ok:
             all_passed = False
         log()
