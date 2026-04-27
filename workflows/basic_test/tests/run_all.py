@@ -6,10 +6,14 @@ Usage:
     python run_all.py --skip-pytest   # skip unit tests, run integration only
 
 Test phases:
-    1. Pytest suite         (66 tests: unit, pool, engine, scopes, lifecycle)
+    1. Pytest suite         (unit, pool, engine, scopes, lifecycle, priority,
+                             environment isolation)
     2. Integration tests    (real YAML pipelines through v4 API)
     3. Robustness tests     (14 edge case and recovery tests)
     4. Devil tests          (34 adversarial stress tests)
+    5. Rare event workflow  (mock + real-component smoke + real cellpose;
+                             cellpose test skips cleanly when run from an
+                             env without working torch/cellpose)
 """
 
 import os
@@ -1215,6 +1219,7 @@ def main():
     parser.add_argument("--skip-pytest", action="store_true")
     parser.add_argument("--skip-robustness", action="store_true")
     parser.add_argument("--skip-devil", action="store_true")
+    parser.add_argument("--skip-rare-event", action="store_true")
     args = parser.parse_args()
 
     import engine
@@ -1273,6 +1278,21 @@ def main():
             all_passed = False
         log()
 
+    # Phase 5: Rare event selection workflow (real pipeline + smoke)
+    # Runs in the same Python that invoked run_all.py. From an env with
+    # working cellpose+torch (e.g. dino3_test), the real cellpose test
+    # actually runs; from an env without, it skips cleanly.
+    if not args.skip_rare_event:
+        log("-" * WIDTH)
+        log("  Phase 5: Rare event selection (real pipeline + smoke)")
+        log("-" * WIDTH)
+        rare_event_path = (ROOT / "workflows" / "rare_event_selection"
+                           / "tests" / "run_tests.py")
+        rare_ok = run_script(log, "rare_event", rare_event_path)
+        if not rare_ok:
+            all_passed = False
+        log()
+
     # Summary
     elapsed_total = time.perf_counter() - t_total
     log("=" * WIDTH)
@@ -1286,6 +1306,8 @@ def main():
         log(f"  Robustness:   {'PASS' if rob_ok else 'FAIL'}")
     if not args.skip_devil:
         log(f"  Devil:        {'PASS' if devil_ok else 'FAIL'}")
+    if not args.skip_rare_event:
+        log(f"  Rare event:   {'PASS' if rare_ok else 'FAIL'}")
     log()
     log(f"  Total time:   {_fmt(elapsed_total)}")
     log()

@@ -43,6 +43,23 @@ def _wait_results(engine, name, expected, timeout=30):
     return collected
 
 
+def _wait_for_completion(engine, name, expected, timeout=30):
+    """Poll results and status; return as soon as results+failed >= expected.
+
+    Avoids waiting the full timeout when a job has already failed (the
+    failure is recorded in status, not as a result).
+    """
+    t0 = time.monotonic()
+    collected = []
+    while time.monotonic() - t0 < timeout:
+        collected.extend(engine.results(name))
+        s = engine.status(name)
+        if len(collected) + s["failed"] >= expected:
+            return collected, s
+        time.sleep(0.2)
+    return collected, engine.status(name)
+
+
 # ---- Tests with mock steps -------------------------------------------
 
 
@@ -407,15 +424,137 @@ def test_mock_error_in_pipeline():
         shutil.rmtree(tmp, True)
 
 
+# ---- Smoke tests with real components (no cellpose) ------------------
+
+
+def test_real_components_smoke():
+    """End-to-end smoke test: real preprocess.py + extract_features.py +
+    feedback.py from the workflow's steps directory, on real
+    skimage.human_mitosis. Cellpose is stubbed with deterministic synthetic
+    masks so this runs in any env that has skimage + numpy."""
+    try:
+        import skimage  # noqa: F401
+    except ImportError as exc:
+        return None, f"skipped: {exc}"
+
+    import json
+    from engine import Engine
+
+    real_steps = BASE / "steps"
+    tmp = tempfile.mkdtemp()
+    try:
+        # Copy the real, production step files we want to actually exercise
+        for name in ("preprocess.py", "extract_features.py", "feedback.py"):
+            shutil.copy2(real_steps / name, tmp)
+
+        # Stub the segment step: deterministic 5x5 grid of labeled "cells".
+        # No cellpose, no torch -- works in any env with numpy.
+        Path(tmp, "segment.py").write_text(textwrap.dedent("""
+            import numpy as np
+            METADATA = {"max_workers": 1}
+            def run(pd, state, **p):
+                img = pd["preprocess"]["image_preprocessed"]
+                masks = np.zeros(img.shape, dtype=np.int32)
+                h, w = img.shape
+                cell = 30
+                step_r, step_c = h // 6, w // 6
+                cell_id = 0
+                for r0 in range(step_r, h - cell, step_r):
+                    for c0 in range(step_c, w - cell, step_c):
+                        cell_id += 1
+                        masks[r0:r0+cell, c0:c0+cell] = cell_id
+                pd["segment"] = {
+                    "masks": masks,
+                    "n_cells": int(masks.max()),
+                    "diameter": p.get("diameter"),
+                }
+                return pd
+        """))
+
+        out_dir = Path(tmp, "output")
+        yaml_path = Path(tmp, "pipeline.yaml")
+        yaml_path.write_text(textwrap.dedent(f"""
+            metadata:
+              functions_dir: "{Path(tmp).as_posix()}"
+              verbose: 0
+            wf:
+              - preprocess:
+                  sigma: 1.0
+                  clip_limit: 0.03
+              - segment:
+              - extract_features:
+                  select_by: "area"
+                  percentile: 90
+              - feedback:
+                  output_dir: "{out_dir.as_posix()}"
+        """))
+
+        with Engine() as e:
+            e.register("smoke", str(yaml_path))
+            e.submit("smoke", {"data_source": "skimage.human_mitosis"})
+            results, status = _wait_for_completion(
+                e, "smoke", 1, timeout=60,
+            )
+
+        if status["failed"] > 0:
+            return False, f"step failed: {status['failures'][0]['error'][:120]}"
+        if not results:
+            return False, f"no results (status: {status})"
+
+        r = results[0]
+
+        # Real preprocess.py loaded a real skimage image
+        shape = r["preprocess"]["shape"]
+        if shape[0] < 100 or shape[1] < 100:
+            return False, f"preprocess image suspiciously small: {shape}"
+        if r["preprocess"]["data_source"] != "skimage.human_mitosis":
+            return False, "preprocess did not record data source"
+
+        # Real extract_features.py ran skimage.measure.regionprops_table
+        props = r["extract_features"]["properties"]
+        n_extracted = len(props["label"])
+        if n_extracted < 1:
+            return False, "extract_features found no cells"
+        required_keys = {
+            "label", "area", "centroid-0", "centroid-1", "eccentricity",
+            "mean_intensity", "max_intensity", "solidity",
+            "major_axis_length", "minor_axis_length",
+        }
+        missing = required_keys - set(props.keys())
+        if missing:
+            return False, f"regionprops missing keys: {sorted(missing)}"
+
+        # Real feedback.py wrote JSON we can read back
+        fb_path = Path(r["feedback"]["filepath"])
+        if not fb_path.exists():
+            return False, f"feedback JSON not on disk: {fb_path}"
+        with open(fb_path) as f:
+            fb_data = json.load(f)
+        if "cells" not in fb_data:
+            return False, f"feedback JSON missing 'cells' key: {sorted(fb_data)}"
+        n_in_json = len(fb_data["cells"])
+        if n_in_json != r["feedback"]["n_selected"]:
+            return False, (f"feedback count mismatch: "
+                           f"n_selected={r['feedback']['n_selected']} but "
+                           f"JSON has {n_in_json} cells")
+
+        return True, (f"real preprocess+extract+feedback on {shape}: "
+                      f"{n_extracted} cells, {r['feedback']['n_selected']} "
+                      f"selected, JSON OK")
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 # ---- Test with real pipeline (requires cellpose + skimage) -----------
 
 
 def test_real_pipeline():
     """Run the actual rare_event_selection pipeline with real packages.
-    Skipped if cellpose or skimage are not installed."""
+    Skipped if cellpose or skimage are not installed in the orchestrator env,
+    or if a torch/scipy DLL conflict prevents cellpose from loading."""
     try:
-        import cellpose
-        import skimage
+        import cellpose  # noqa: F401
+        import skimage  # noqa: F401
     except ImportError as exc:
         return None, f"skipped: {exc}"
 
@@ -423,35 +562,37 @@ def test_real_pipeline():
 
     yaml_path = str(BASE / "pipelines" / "rare_event_selection_pipeline.yaml")
 
-    output_dir = tempfile.mkdtemp()
     try:
         with Engine() as e:
             e.register("analysis", yaml_path)
             e.submit("analysis", {"data_source": "skimage.human_mitosis"})
+            results, status = _wait_for_completion(
+                e, "analysis", 1, timeout=120,
+            )
 
-            results = _wait_results(e, "analysis", 1, timeout=120)
+        if status["failed"] > 0:
+            err = status["failures"][0]["error"]
+            if "DLL" in err or "fbgemm" in err or "WinError" in err:
+                return None, (f"skipped: DLL conflict in orchestrator env "
+                              f"(needs separate env): {err[:80]}")
+            return False, f"failed: {err[:120]}"
 
         if not results:
-            s = e.status("analysis")
-            if s["failed"] > 0:
-                err = s["failures"][0]["error"]
-                if "DLL" in err or "fbgemm" in err or "WinError" in err:
-                    return None, f"skipped: DLL conflict (needs separate env): {err[:80]}"
-            return False, f"no results (status: {s})"
+            return False, f"no results within timeout (status: {status})"
 
         r = results[0]
         n_cells = r["segment"]["n_cells"]
         n_selected = r["feedback"]["n_selected"]
 
         if n_cells < 1:
-            return False, f"no cells found"
+            return False, "no cells found"
         if n_selected < 1:
-            return False, f"no cells selected"
+            return False, "no cells selected"
 
         return True, (f"real pipeline: {n_cells} cells segmented, "
                       f"{n_selected} selected (p99 by area)")
     finally:
-        shutil.rmtree(output_dir, True)
+        pass
 
 
 def test_real_pipeline_yaml_registers():
@@ -478,6 +619,7 @@ TESTS = [
     ("Mock: data flow integrity",        test_mock_data_flow_integrity),
     ("Mock: multiple images",            test_mock_multiple_images),
     ("Mock: error handling",             test_mock_error_in_pipeline),
+    ("Smoke: real components (no cellpose)", test_real_components_smoke),
     ("Real: YAML registers",             test_real_pipeline_yaml_registers),
     ("Real: full pipeline (cellpose)",   test_real_pipeline),
 ]
