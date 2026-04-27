@@ -12,21 +12,18 @@ gray-level run-length, spatial neighbourhoods, radius of gyration).
 Architecture
 ============
 
-The module has three layers, in execution order:
+The module has two user-facing layers, in execution order:
 
-1. **Tier A -- native regionprops** (always on).
-   The Tier A property list (``DEFAULT_PROPERTIES``) is passed straight to
-   ``regionprops_table``. Each property maps directly to a column in the
-   output dict. Override via the ``properties`` YAML param to trim or
-   extend.
+1. **Default features** (always on).
+   The ``DEFAULT_PROPERTIES`` list is passed straight to
+   ``regionprops_table`` for native columns. A small set of cheap
+   derived columns is then added when its source columns exist:
+   circularity, aspect_ratio, orientation_deg, intensity_total, and
+   intensity_cv. Override via the ``properties`` YAML param to trim or
+   extend the native regionprops inputs; dependent derived columns will
+   naturally disappear when their sources are absent.
 
-2. **Tier B -- derived columns** (always on if their sources are present).
-   Cheap algebra over Tier A -- circularity, aspect_ratio,
-   orientation_deg, intensity_total, intensity_cv. Each is computed only
-   if its source columns exist, so trimming Tier A naturally trims its
-   dependent derivatives.
-
-3. **Extras** (opt-in).
+2. **Opt-in feature groups**.
    Each extra is a self-contained handler that receives a ``_Context``
    object and adds named columns to the output dict. Handlers are wired
    to the dispatcher through the ``EXTRAS`` registry at the bottom of
@@ -35,15 +32,13 @@ The module has three layers, in execution order:
    expand to the full set of members in that family.
 
 
-Group hierarchy
-===============
-Auto-derived from ``EXTRAS``; do not maintain by hand:
+Feature groups
+==============
 
-    morphology      rg_spread
-    intensity       global_bg, local_bg
-    neighbourhood   neighbours
-    texture         gradients, stat_texture, lbp, fft, glrlm
-    all             every extra above
+``FEATURE_GROUPS`` is built from ``EXTRAS`` at import time; do not keep a
+separate hand-maintained group table. Inspect ``FEATURE_GROUPS`` at runtime
+to see the current mapping from group names to individual extras. The
+special ``all`` group always expands to every registered extra.
 
 
 Adding a new extra
@@ -119,7 +114,7 @@ METADATA = {
 
 
 # ---------------------------------------------------------------------------
-# Tier A configuration: the regionprops_table property list. Trim or extend
+# Default native feature configuration: the regionprops_table property list. Trim or extend
 # via the ``properties`` YAML parameter.
 # ---------------------------------------------------------------------------
 
@@ -187,13 +182,13 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Tier B: always-on derived columns.
+# Always-on derived columns.
 # Each is added only if its sources are present in ``props``, so trimming
-# Tier A naturally trims its derivatives.
+# the native regionprops set naturally trims its derivatives.
 # ---------------------------------------------------------------------------
 
 def _add_derived(props: dict) -> None:
-    """Cheap algebraic derivatives of the Tier A regionprops set.
+    """Cheap algebraic derivatives of the native regionprops set.
 
     All divisions are wrapped in ``np.errstate`` so degenerate objects
     (zero perimeter, zero minor axis, zero mean intensity) yield NaN
@@ -277,7 +272,8 @@ def _run_extras(props, masks, img, labels, extras, params, pixel_size_um) -> Non
 
     Handler execution order is family-then-name so outputs are
     reproducible. Order does not affect correctness because handlers do
-    not read each other's columns -- they all consume Tier A regionprops.
+    not read each other's columns -- they all consume default regionprops
+    and derived columns.
     """
     from scipy.ndimage import find_objects
 
@@ -318,10 +314,10 @@ def _expand_extras(extras):
 
 def _to_uint8(img: np.ndarray) -> np.ndarray:
     """Map any non-negative image to ``uint8 [0, 255]`` for texture
-    features that expect 8-bit input (LBP, GLRLM quantisation source).
+    features that expect 8-bit input, currently LBP.
 
-    Preserves uint8 input untouched. Otherwise rescales by the global
-    ``img.max()`` and clips to [0, 255]. Returns a fresh array.
+    Returns uint8 input unchanged. Otherwise rescales by the global
+    ``img.max()`` and clips to [0, 255], returning a new array.
     """
     arr = np.asarray(img)
     if arr.dtype == np.uint8:

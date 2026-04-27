@@ -6,7 +6,7 @@ images, so failures point directly at the relevant feature implementation.
 
 Areas exercised:
 
-- Default property set (Tier A regionprops).
+- Default regionprops property set.
 - Always-on derived columns (circularity, aspect_ratio, orientation_deg,
   intensity_total, intensity_cv).
 - Orientation conversion on horizontal vs vertical ellipses.
@@ -64,7 +64,7 @@ def _ellipse(masks, cy, cx, ry, rx, label):
 
 
 # ---------------------------------------------------------------------------
-# Tier A: defaults
+# Defaults
 # ---------------------------------------------------------------------------
 
 
@@ -83,7 +83,7 @@ def test_defaults_include_core_properties():
 
 
 # ---------------------------------------------------------------------------
-# Tier B: always-on derived columns
+# Always-on derived columns
 # ---------------------------------------------------------------------------
 
 
