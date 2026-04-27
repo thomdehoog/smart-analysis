@@ -124,34 +124,38 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
 # ---------------------------------------------------------------------------
 
 def _add_derived(props: dict) -> None:
-    if "area" in props and "perimeter_crofton" in props:
-        a = np.asarray(props["area"], dtype=float)
-        p = np.asarray(props["perimeter_crofton"], dtype=float)
-        props["circularity"] = np.where(p > 0, 4 * np.pi * a / (p * p), np.nan)
+    # np.where evaluates both branches before selecting, so divisions by zero
+    # would emit warnings even though the result is correctly NaN. Suppress
+    # those warnings within this scope; the np.where calls handle the math.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if "area" in props and "perimeter_crofton" in props:
+            a = np.asarray(props["area"], dtype=float)
+            p = np.asarray(props["perimeter_crofton"], dtype=float)
+            props["circularity"] = np.where(p > 0, 4 * np.pi * a / (p * p), np.nan)
 
-    if "axis_major_length" in props and "axis_minor_length" in props:
-        maj = np.asarray(props["axis_major_length"], dtype=float)
-        mn = np.asarray(props["axis_minor_length"], dtype=float)
-        props["aspect_ratio"] = np.where(mn > 0, maj / mn, np.nan)
+        if "axis_major_length" in props and "axis_minor_length" in props:
+            maj = np.asarray(props["axis_major_length"], dtype=float)
+            mn = np.asarray(props["axis_minor_length"], dtype=float)
+            props["aspect_ratio"] = np.where(mn > 0, maj / mn, np.nan)
 
-    if "orientation" in props:
-        # skimage `orientation` is the angle from the row axis in [-pi/2, pi/2].
-        # Converting via (90 - degrees(orientation)) maps a horizontal major
-        # axis to 0 deg and a vertical major axis to 90 deg, in [0, 180).
-        props["orientation_deg"] = (90.0 - np.degrees(props["orientation"])) % 180.0
+        if "orientation" in props:
+            # skimage `orientation` is the angle from the row axis in [-pi/2, pi/2].
+            # Converting via (90 - degrees(orientation)) maps a horizontal major
+            # axis to 0 deg and a vertical major axis to 90 deg, in [0, 180).
+            props["orientation_deg"] = (90.0 - np.degrees(props["orientation"])) % 180.0
 
-    if "intensity_mean" in props:
-        mean_i = np.asarray(props["intensity_mean"], dtype=float)
-        # num_pixels is a true pixel count even when `spacing=` is set, so
-        # intensity_total stays a real integrated intensity.
-        if "num_pixels" in props:
-            n_px = np.asarray(props["num_pixels"], dtype=float)
-            props["intensity_total"] = mean_i * n_px
-        elif "area" in props:
-            props["intensity_total"] = mean_i * np.asarray(props["area"], dtype=float)
-        if "intensity_std" in props:
-            std_i = np.asarray(props["intensity_std"], dtype=float)
-            props["intensity_cv"] = np.where(mean_i > 0, std_i / mean_i, np.nan)
+        if "intensity_mean" in props:
+            mean_i = np.asarray(props["intensity_mean"], dtype=float)
+            # num_pixels is a true pixel count even when `spacing=` is set, so
+            # intensity_total stays a real integrated intensity.
+            if "num_pixels" in props:
+                n_px = np.asarray(props["num_pixels"], dtype=float)
+                props["intensity_total"] = mean_i * n_px
+            elif "area" in props:
+                props["intensity_total"] = mean_i * np.asarray(props["area"], dtype=float)
+            if "intensity_std" in props:
+                std_i = np.asarray(props["intensity_std"], dtype=float)
+                props["intensity_cv"] = np.where(mean_i > 0, std_i / mean_i, np.nan)
 
 
 # ---------------------------------------------------------------------------
@@ -213,26 +217,27 @@ def _add_local_bg(props, masks, img, slices, labels, radius) -> None:
 
     props["bg_local_mean"] = bg_local
 
-    if "intensity_mean" in props:
-        mean_i = np.asarray(props["intensity_mean"], dtype=float)
-        props["mean_minus_local_bg"] = mean_i - bg_local
-        props["mean_over_local_bg"] = np.where(
-            bg_local > 0, mean_i / bg_local, np.nan
-        )
-        # TILB v2 = (I_avg - I_local) * A
-        if "num_pixels" in props:
-            n_px = np.asarray(props["num_pixels"], dtype=float)
-        elif "area" in props:
-            n_px = np.asarray(props["area"], dtype=float)
-        else:
-            n_px = None
-        if n_px is not None:
-            props["total_minus_local_bg"] = (mean_i - bg_local) * n_px
-    if "intensity_total" in props:
-        tot = np.asarray(props["intensity_total"], dtype=float)
-        props["total_over_local_bg"] = np.where(
-            bg_local > 0, tot / bg_local, np.nan
-        )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if "intensity_mean" in props:
+            mean_i = np.asarray(props["intensity_mean"], dtype=float)
+            props["mean_minus_local_bg"] = mean_i - bg_local
+            props["mean_over_local_bg"] = np.where(
+                bg_local > 0, mean_i / bg_local, np.nan
+            )
+            # TILB v2 = (I_avg - I_local) * A
+            if "num_pixels" in props:
+                n_px = np.asarray(props["num_pixels"], dtype=float)
+            elif "area" in props:
+                n_px = np.asarray(props["area"], dtype=float)
+            else:
+                n_px = None
+            if n_px is not None:
+                props["total_minus_local_bg"] = (mean_i - bg_local) * n_px
+        if "intensity_total" in props:
+            tot = np.asarray(props["intensity_total"], dtype=float)
+            props["total_over_local_bg"] = np.where(
+                bg_local > 0, tot / bg_local, np.nan
+            )
 
 
 # ---------------------------------------------------------------------------
