@@ -22,16 +22,12 @@ cell_analysis:
       gpu: true
 
   - extract_features:
-      properties:
-        - label
-        - area
-        - centroid
-        - eccentricity
-        - mean_intensity
-        - max_intensity
-        - solidity
-        - major_axis_length
-        - minor_axis_length
+      # Uses extract_features.DEFAULT_PROPERTIES (full Tier A regionprops set)
+      # plus auto-derived columns: circularity, aspect_ratio, orientation_deg,
+      # intensity_total, intensity_cv. Override `properties:` to trim the set.
+      # Add `extras: [global_bg, local_bg, gradients, stat_texture, rg_spread]`
+      # to opt in to background, gradient, and texture features.
+      # Pass `pixel_size_um: [dy, dx]` to get area/perimeter/axes in um.
 
   - select_features:
       feature: "area"
