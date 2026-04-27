@@ -917,11 +917,18 @@ def test_max_workers_parallelism():
         if s["n_tiles"] != 20:
             return False, f"expected 20 tiles, got {s['n_tiles']}"
 
-        # With 5 workers and 0.2s each, 20 tiles should take ~0.8s
-        # With 1 worker it would take ~4s
-        # Allow generous margin but verify it's faster than sequential
         n_workers = s["n_workers_used"]
         sequential_time = 20 * 0.2  # 4.0s
+
+        # The whole point of max_workers=5 is parallel execution. Verify it
+        # actually happened: must be faster than sequential AND must have
+        # used more than one worker process.
+        if elapsed >= sequential_time:
+            return False, (f"no parallelism: {elapsed:.1f}s "
+                           f">= sequential {sequential_time:.1f}s")
+        if n_workers < 2:
+            return False, (f"only {n_workers} worker PID(s) used; "
+                           f"max_workers=5 should yield at least 2")
 
         return True, (f"20 tiles in {elapsed:.1f}s using {n_workers} workers "
                       f"(sequential would be ~{sequential_time:.1f}s)")

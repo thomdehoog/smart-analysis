@@ -31,10 +31,12 @@ import tempfile
 import shutil
 import atexit
 import threading
-import multiprocessing
 from pathlib import Path
 
+import psutil
+
 ROOT = Path(__file__).parent.parent.parent.parent
+BASE = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 WIDTH = 70
@@ -78,11 +80,10 @@ def _fmt(seconds):
 
 
 def _count_children():
-    try:
-        import psutil
-        return len(psutil.Process().children(recursive=True))
-    except ImportError:
-        return len(multiprocessing.active_children())
+    """Count subprocess children of the engine process. Requires psutil
+    because the v4 engine uses subprocess.Popen, which
+    multiprocessing.active_children() does not see (would yield 0)."""
+    return len(psutil.Process().children(recursive=True))
 
 
 def _wait_results(engine, name, expected, timeout=30):
@@ -104,8 +105,7 @@ def test_metadata_tampering():
     """Step modifies metadata; next step still executes correctly."""
     from engine import Engine
 
-    base = Path(__file__).parent
-    yaml_path = str(base / "pipelines" / "test_metadata_tamper_pipeline.yaml")
+    yaml_path = str(BASE / "pipelines" / "test_metadata_tamper_pipeline.yaml")
 
     with Engine() as e:
         e.register("test", yaml_path)
@@ -131,8 +131,7 @@ def test_identity_passthrough():
     """Identity step returns data unmodified; pipeline continues."""
     from engine import Engine
 
-    base = Path(__file__).parent
-    yaml_path = str(base / "pipelines" / "test_identity_pipeline.yaml")
+    yaml_path = str(BASE / "pipelines" / "test_identity_pipeline.yaml")
 
     with Engine() as e:
         e.register("test", yaml_path)
@@ -413,8 +412,7 @@ def test_scoped_yaml_spatial():
     """Run the scoped spatial YAML pipeline with the v4 scope API."""
     from engine import Engine
 
-    base = Path(__file__).parent
-    yaml_path = str(base / "pipelines" / "test_scoped_spatial_pipeline.yaml")
+    yaml_path = str(BASE / "pipelines" / "test_scoped_spatial_pipeline.yaml")
 
     with Engine() as e:
         e.register("test", yaml_path)

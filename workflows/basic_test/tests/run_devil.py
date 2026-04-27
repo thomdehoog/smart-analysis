@@ -17,10 +17,11 @@ import tempfile
 import shutil
 import atexit
 import threading
-import multiprocessing
 import concurrent.futures
 import gc
 from pathlib import Path
+
+import psutil
 
 ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -66,11 +67,10 @@ def _fmt(seconds):
 
 
 def _count_children():
-    try:
-        import psutil
-        return len(psutil.Process().children(recursive=True))
-    except ImportError:
-        return len(multiprocessing.active_children())
+    """Count subprocess children of the engine process. Requires psutil
+    because the v4 engine uses subprocess.Popen, which
+    multiprocessing.active_children() does not see (would yield 0)."""
+    return len(psutil.Process().children(recursive=True))
 
 
 def _wait_results(engine, name, expected, timeout=30):
@@ -408,18 +408,16 @@ def test_corrupt_replace_pipeline_data():
 
 
 def test_corrupt_dict_subclass():
-    """Step returns a dict subclass. With subprocess workers, the custom
-    class is defined inside the step and not importable by the parent.
-    Pickle may crash the worker or strip the subclass. Either is acceptable."""
+    """Step returns a dict subclass (OrderedDict). Engine must accept it
+    as a valid return and round-trip the data through pickle cleanly."""
     from engine import Engine
 
     _temp_step("""
+        from collections import OrderedDict
         def run(pd, state, **p):
-            # Return a plain dict with a marker instead of a custom subclass,
-            # since subprocess pickle cannot transport classes defined in steps.
-            pd["fancy"] = True
-            pd["type_note"] = "dict subclass stripped by pickle in subprocess"
-            return pd
+            result = OrderedDict(pd)
+            result["ordered"] = True
+            return result
     """, name="rcds_fancy")
     yaml = _temp_yaml("wf:\n  - rcds_fancy:")
 
@@ -429,13 +427,11 @@ def test_corrupt_dict_subclass():
         results = _wait_results(e, "test", 1, timeout=15)
 
     if not results:
-        return False, "no result returned"
-
-    if not results[0].get("fancy"):
-        return False, "fancy key missing"
-
-    return True, ("dict subclass test: subprocess isolation means custom "
-                  "classes cannot be pickled back -- plain dict used instead")
+        return False, "no result returned for OrderedDict step"
+    if not results[0].get("ordered"):
+        return False, "ordered marker missing from OrderedDict result"
+    return True, (f"dict subclass handled: returned as "
+                  f"{type(results[0]).__name__}, marker preserved")
 
 
 def test_corrupt_non_dict_return():
@@ -601,7 +597,9 @@ def test_scope_complete_on_unscoped_pipeline():
 
 
 def test_scope_mismatched_labels():
-    """Submit with one scope value, complete with a different one."""
+    """Submit jobs to one scope value; complete signaled on a different value.
+    Only the matching value's jobs should be aggregated -- A's jobs must NOT
+    leak into B's scoped step."""
     from engine import Engine
 
     _temp_step("""
@@ -612,6 +610,7 @@ def test_scope_mismatched_labels():
     _temp_step("""
         def run(pd, state, **p):
             pd["n"] = len(pd["results"])
+            pd["vs"] = sorted(r["v"] for r in pd["results"])
             return pd
     """, name="rsml_b")
     yaml = _temp_yaml("""
@@ -625,22 +624,26 @@ def test_scope_mismatched_labels():
         e.register("test", yaml)
         e.submit("test", {"v": 1}, scope={"group": "A"})
         e.submit("test", {"v": 2}, scope={"group": "A"})
-        # Complete with DIFFERENT group value
         e.submit("test", {"v": 3}, scope={"group": "B"},
                  complete="group")
 
         results = _wait_results(e, "test", 4, timeout=15)
 
-    # Group B should trigger with just the one job (v=3)
+    phase0 = [r for r in results if r.get("_phase") == 0]
     scoped = [r for r in results if r.get("_phase") == 1]
-    if scoped:
-        return True, (f"mismatched label: scoped step ran with "
-                      f"n={scoped[0].get('n')} (only B's job)")
-    return True, "mismatched label handled gracefully"
+
+    if len(phase0) != 3:
+        return False, f"expected 3 phase-0 results, got {len(phase0)}"
+    if not scoped:
+        return False, "scoped step did not trigger for group B"
+    if scoped[0]["n"] != 1 or scoped[0]["vs"] != [3]:
+        return False, (f"scope leak: expected n=1 vs=[3] (only B), "
+                       f"got n={scoped[0]['n']} vs={scoped[0]['vs']}")
+    return True, "scope isolation enforced: B aggregated only its own job"
 
 
 def test_scope_none_value():
-    """Scope key with None as value."""
+    """Scope key with None as value should aggregate like any other value."""
     from engine import Engine
 
     _temp_step("""
@@ -651,6 +654,7 @@ def test_scope_none_value():
     _temp_step("""
         def run(pd, state, **p):
             pd["n"] = len(pd["results"])
+            pd["vs"] = sorted(r["v"] for r in pd["results"])
             return pd
     """, name="rsnv_b")
     yaml = _temp_yaml("""
@@ -662,17 +666,18 @@ def test_scope_none_value():
 
     with Engine() as e:
         e.register("test", yaml)
-        try:
-            e.submit("test", {"v": 1}, scope={"group": None})
-            e.submit("test", {"v": 2}, scope={"group": None},
-                     complete="group")
-            results = _wait_results(e, "test", 3, timeout=15)
-            scoped = [r for r in results if r.get("_phase") == 1]
-            if scoped:
-                return True, f"None scope value worked: n={scoped[0].get('n')}"
-            return True, "None scope value accepted without crash"
-        except Exception as exc:
-            return False, f"exception with None scope: {type(exc).__name__}: {exc}"
+        e.submit("test", {"v": 1}, scope={"group": None})
+        e.submit("test", {"v": 2}, scope={"group": None},
+                 complete="group")
+        results = _wait_results(e, "test", 3, timeout=15)
+
+    scoped = [r for r in results if r.get("_phase") == 1]
+    if not scoped:
+        return False, "scoped step did not trigger with None scope value"
+    if scoped[0]["n"] != 2 or scoped[0]["vs"] != [1, 2]:
+        return False, (f"None-scope aggregation wrong: "
+                       f"got n={scoped[0]['n']} vs={scoped[0]['vs']}")
+    return True, f"None scope value aggregated both jobs: vs={scoped[0]['vs']}"
 
 
 def test_scope_very_long_key():
