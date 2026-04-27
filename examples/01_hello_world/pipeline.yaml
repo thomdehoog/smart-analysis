@@ -1,0 +1,8 @@
+# Minimal one-step pipeline. The single step doubles its input.
+
+metadata:
+  functions_dir: "./steps"
+  verbose: 0
+
+hello-world:
+  - double_it:
