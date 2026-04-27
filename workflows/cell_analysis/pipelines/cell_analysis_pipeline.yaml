@@ -1,0 +1,40 @@
+# Cell Analysis Pipeline
+#
+# Generic cell analysis: load image, segment with Cellpose, measure
+# regionprops, select cells matching a criterion. The output is a
+# list of selected cell labels with their properties, ready to feed
+# downstream tools (visualisation, acquisition feedback, CSV export).
+
+metadata:
+  purpose: "Segment cells, extract features, select cells of interest"
+  version: "1.0"
+  verbose: 2
+  functions_dir: "../steps"
+
+cell_analysis:
+
+  - preprocess:
+      sigma: 1.0
+      clip_limit: 0.03
+
+  - segment:
+      diameter: null    # let Cellpose auto-estimate
+      gpu: true
+
+  - extract_features:
+      properties:
+        - label
+        - area
+        - centroid
+        - eccentricity
+        - mean_intensity
+        - max_intensity
+        - solidity
+        - major_axis_length
+        - minor_axis_length
+
+  - select_features:
+      feature: "area"
+      mode: "percentile"     # percentile | threshold | top_n
+      percentile: 95
+      direction: "high"      # high | low
