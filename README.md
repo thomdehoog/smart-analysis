@@ -5,24 +5,26 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 A Python pipeline engine for scientific image analysis, built for
-real-time adaptive feedback microscopy. Compose image analysis recipes
-from reusable Python steps and a YAML workflow; each step runs in its
-own conda environment, and recipes can stream tile-by-tile from a live
-microscope, aggregate by region, and feed results back into acquisition.
-The same API also handles post-acquisition batch.
+real-time adaptive feedback microscopy.
 
-## Install
+## Why it exists
 
-```bash
-git clone https://github.com/thomdehoog/smart-analysis.git
-cd smart-analysis
-pip install -e .[test]
-```
+- **Live adaptive feedback.** Submit work tile-by-tile as the
+  microscope acquires; aggregate by region as scans complete; feed
+  results back into the next acquisition decision in real time.
+- **Per-step conda environments.** Each step runs in its own conda env
+  via subprocess, so PyTorch, scikit-image, Cellpose, and other clashing
+  native libraries coexist in one workflow without DLL conflicts.
+- **Composable recipes.** Define multi-step workflows in YAML; write
+  each step as a plain Python function. Reuse and remix steps across
+  recipes without rewriting plumbing.
+- **Warm workers for heavy models.** Cellpose, segmentation, and other
+  expensive objects load once and stay hot across submissions, keeping
+  per-tile latency sub-second during live acquisition.
+- **Same API for batch.** Recipes you write for live microscopy also
+  process archived datasets unchanged.
 
-Requires Python 3.10+. Conda is optional (only needed if you want to
-isolate steps in different environments).
-
-## A 30-line example
+## What a recipe looks like
 
 **`steps/double_it.py`**
 ```python
@@ -55,26 +57,29 @@ with Engine() as e:
 print(results[0]["doubled"])   # -> 42
 ```
 
+## Install and test
+
+```bash
+git clone https://github.com/thomdehoog/smart-analysis.git
+cd smart-analysis
+pip install -e .[test]
+pytest
+```
+
+Requires Python 3.10+. Conda is optional (only needed for per-step
+environment isolation).
+
 ## Where to go next
 
 - [`examples/`](examples/) — four runnable workflows: hello world,
   scoped aggregation, environment isolation, adaptive microscopy.
-- [`AGENTS.md`](AGENTS.md) — repo brief: concepts, file map, design
-  philosophy, anti-patterns. Useful for fast onboarding (humans and AI).
+- [`AGENTS.md`](AGENTS.md) — repo brief with concepts, file map, and
+  design philosophy. Useful for fast onboarding (humans and AI).
 - [`docs/Engine_v4_Design.md`](docs/Engine_v4_Design.md) — full design
   rationale.
 - [`docs/Usage_Guide.md`](docs/Usage_Guide.md) — tutorial walkthrough.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to develop and submit changes.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development setup.
 - [`CHANGELOG.md`](CHANGELOG.md) — version history.
-
-## Testing
-
-```bash
-pytest                        # everything runnable in the active env
-pytest -m "not slow"          # fast subset
-pytest -m cellpose            # only real-cellpose tests
-pytest engine/                # engine unit tests only
-```
 
 ## License
 
