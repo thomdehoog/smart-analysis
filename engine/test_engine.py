@@ -43,6 +43,8 @@ import time
 import unittest
 from pathlib import Path
 
+import pytest
+
 # Ensure the engine package is importable
 ENGINE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ENGINE_DIR.parent))
@@ -911,11 +913,13 @@ class TestEngineScopes(unittest.TestCase):
 # ---- Engine (environment isolation) ----------------------------------
 
 
+@pytest.mark.conda_env
 class TestEngineEnvironmentIsolation(unittest.TestCase):
     """Verify the engine actually launches steps in their declared conda env.
 
     Requires the SMART--basic_test--env_a conda env (Python 3.10) created
-    by workflows/basic_test/environments/setup_env.py.
+    by workflows/basic_test/environments/setup_env.py. The conda_env marker
+    lets CI exclude this class via ``pytest -m "not conda_env"``.
     """
 
     @classmethod

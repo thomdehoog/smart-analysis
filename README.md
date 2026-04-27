@@ -6,7 +6,7 @@ tile-by-tile from an acquiring microscope, aggregating into regions, and
 feeding results back into acquisition decisions in real time. The same
 API also runs as a plain post-acquisition batch tool.
 
-[![tests](https://img.shields.io/badge/tests-165%20passing-brightgreen)](https://github.com/thomdehoog/smart-analysis)
+[![tests](https://github.com/thomdehoog/smart-analysis/actions/workflows/test.yml/badge.svg?branch=v4-engine)](https://github.com/thomdehoog/smart-analysis/actions/workflows/test.yml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
