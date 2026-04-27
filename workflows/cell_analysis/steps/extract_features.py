@@ -5,13 +5,29 @@ Always computed (Tier A native + Tier B derived):
     - regionprops_table properties listed in DEFAULT_PROPERTIES
     - circularity, aspect_ratio, orientation_deg, intensity_total, intensity_cv
 
-Opt-in via the ``extras`` parameter (list of group names):
+Opt-in via the ``extras`` parameter (list of group or extra names).
+
+Group names (expand to all extras in that family):
+
+    "morphology"    -> rg_spread
+    "intensity"     -> global_bg, local_bg
+    "spatial"       -> neighbours
+    "texture"       -> gradients, stat_texture, lbp, fft, glrlm
+    "all"           -> every extra below
+
+Individual extras:
+
     "global_bg"     mean intensity outside all labels (broadcast as scalar
                     column); adds bg_global_mean.
     "local_bg"      5-px collar around each object, neighbour-excluded, with
                     holes filled before forming the collar; adds bg_local_mean,
                     mean_minus_local_bg, mean_over_local_bg,
                     total_minus_local_bg, total_over_local_bg.
+    "neighbours"    KDTree spatial features over object centroids; adds
+                    nn_distance (closest neighbour), nnK_mean_distance
+                    (mean to K nearest, K = neighbour_k), and one
+                    neighbours_within_R column per radius in neighbour_radii.
+                    Distances respect pixel_size_um when set.
     "gradients"     image-wide Prewitt and Roberts magnitudes summarised per
                     object via vectorised bincount means; adds
                     prewitt_magnitude_mean, roberts_magnitude_mean.
@@ -21,12 +37,14 @@ Opt-in via the ``extras`` parameter (list of group names):
     "lbp"           local binary pattern image (P=8, R=1, default method) +
                     six per-object histogram statistics; adds lbp_mean,
                     lbp_std, lbp_energy, lbp_entropy, lbp_skewness,
-                    lbp_kurtosis.
-    "fft"           per-object 2D FFT on the bbox crop with the object mask
-                    applied; six statistics over the magnitude spectrum;
+                    lbp_kurtosis. The LBP image is computed once over the
+                    full image; object-border pixels see neighbour context.
+    "fft"           per-object 2D FFT (numpy.fft.fft2) on the bbox crop with
+                    the object mask applied; six statistics over the
+                    magnitude spectrum (no windowing). Entropy uses a
+                    256-bin histogram of |F| (range = per-object min/max);
                     adds fft_mean, fft_std, fft_energy, fft_entropy,
-                    fft_skewness, fft_kurtosis. Entropy uses a 256-bin
-                    histogram of magnitudes.
+                    fft_skewness, fft_kurtosis.
     "glrlm"         gray-level run-length matrix summed over four
                     directions (horizontal, vertical, +45, -45) with
                     one-based gray-level indexing to keep LGLRE finite;
@@ -57,6 +75,11 @@ Parameters (via YAML / **params)
                        method ("default" / "ror" / "uniform" / "var").
     glrlm_levels     : int, default 16. Gray levels for the run-length matrix.
     fft_entropy_bins : int, default 256. Magnitude histogram bins for fft.
+    neighbour_k      : int, default 5. K for nnK_mean_distance.
+    neighbour_radii  : list of numbers, default [5, 50, 250]. Radii for the
+                       neighbours_within_R columns; same units as the centroid
+                       coordinates (pixels by default, microns when
+                       pixel_size_um is set).
 
 Outputs (under pipeline_data["extract_features"])
     properties : dict[str, ndarray]    per-cell arrays aligned with "label"
@@ -90,9 +113,35 @@ DEFAULT_PROPERTIES = [
 
 
 _VALID_EXTRAS = {
-    "global_bg", "local_bg", "gradients", "stat_texture", "rg_spread",
-    "lbp", "fft", "glrlm",
+    "global_bg", "local_bg", "neighbours",
+    "gradients", "stat_texture", "lbp", "fft", "glrlm",
+    "rg_spread",
 }
+
+
+_FEATURE_GROUPS = {
+    "morphology": {"rg_spread"},
+    "intensity": {"global_bg", "local_bg"},
+    "spatial": {"neighbours"},
+    "texture": {"gradients", "stat_texture", "lbp", "fft", "glrlm"},
+}
+_FEATURE_GROUPS["all"] = set().union(*_FEATURE_GROUPS.values())
+
+
+def _expand_extras(extras):
+    """Expand group names (morphology/intensity/spatial/texture/all) to
+    their constituent extra names. Pass-through for already-individual
+    extras. Returns (expanded_set, unknown_names)."""
+    expanded = set()
+    unknown = set()
+    for name in extras:
+        if name in _FEATURE_GROUPS:
+            expanded |= _FEATURE_GROUPS[name]
+        elif name in _VALID_EXTRAS:
+            expanded.add(name)
+        else:
+            unknown.add(name)
+    return expanded, unknown
 
 
 def run(pipeline_data: dict, state: dict, **params) -> dict:
@@ -101,15 +150,17 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     verbose = pipeline_data["metadata"].get("verbose", 0)
 
     properties = list(params.get("properties", DEFAULT_PROPERTIES))
-    extras = list(params.get("extras", []) or [])
+    requested_extras = list(params.get("extras", []) or [])
     pixel_size_um = params.get("pixel_size_um")
 
-    unknown = set(extras) - _VALID_EXTRAS
+    extras_set, unknown = _expand_extras(requested_extras)
     if unknown:
         raise ValueError(
             f"Unknown extras {sorted(unknown)}. "
-            f"Expected subset of {sorted(_VALID_EXTRAS)}."
+            f"Expected groups {sorted(_FEATURE_GROUPS)} or extras "
+            f"{sorted(_VALID_EXTRAS)}."
         )
+    extras = sorted(extras_set)
 
     masks = pipeline_data["segment"]["masks"]
     img = pipeline_data["preprocess"]["image"]
@@ -197,6 +248,11 @@ def _add_extras(props, masks, img, labels, extras, params, pixel_size_um) -> Non
     if "local_bg" in extras:
         _add_local_bg(props, masks, img, slices, labels,
                       int(params.get("bg_radius", 5)))
+
+    if "neighbours" in extras:
+        _add_neighbours(props, labels,
+                        k=int(params.get("neighbour_k", 5)),
+                        radii=list(params.get("neighbour_radii", [5, 50, 250])))
 
     if "gradients" in extras:
         _add_gradients(props, masks, img, labels)
@@ -391,6 +447,44 @@ def _add_rg_spread(props, masks, img, slices, labels, pixel_size_um) -> None:
 
     props["radius_of_gyration"] = rg
     props["intensity_radial_variance_normalised"] = spread
+
+
+# ---------------------------------------------------------------------------
+# Spatial neighbours via cKDTree on object centroids.
+# Distances and radii are in centroid-coordinate units (pixels by default,
+# microns when pixel_size_um was passed to regionprops_table).
+# ---------------------------------------------------------------------------
+
+def _add_neighbours(props, labels, k, radii) -> None:
+    from scipy.spatial import cKDTree
+
+    n = len(labels)
+    nn_dist = np.full(n, np.nan, dtype=np.float64)
+    nnk_mean = np.full(n, np.nan, dtype=np.float64)
+    counts_per_radius = {r: np.zeros(n, dtype=np.int64) for r in radii}
+
+    if "centroid-0" in props and "centroid-1" in props and n >= 2:
+        pts = np.stack([
+            np.asarray(props["centroid-0"], dtype=float),
+            np.asarray(props["centroid-1"], dtype=float),
+        ], axis=1)
+        tree = cKDTree(pts)
+        d, _ = tree.query(pts, k=2)
+        nn_dist = d[:, 1]
+        k_query = min(k + 1, n)
+        if k_query > 1:
+            d_k, _ = tree.query(pts, k=k_query)
+            nnk_mean = d_k[:, 1:].mean(axis=1)
+        for r in radii:
+            counts_per_radius[r] = np.array(
+                [len(x) - 1 for x in tree.query_ball_point(pts, r=float(r))],
+                dtype=np.int64,
+            )
+
+    props["nn_distance"] = nn_dist
+    props[f"nn{k}_mean_distance"] = nnk_mean
+    for r in radii:
+        props[f"neighbours_within_{r}"] = counts_per_radius[r]
 
 
 # ---------------------------------------------------------------------------

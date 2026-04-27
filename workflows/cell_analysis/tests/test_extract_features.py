@@ -357,9 +357,9 @@ def test_lbp_runs_and_emits_six_columns():
 
 
 def test_lbp_uniform_object_has_zero_std_and_unit_energy():
-    """Constant intensity inside a disk -> LBP code 0 (or P+1) for centre
-    pixels (no neighbour exceeds), so the LBP distribution collapses to a
-    single value -> std 0, energy 1, entropy 0."""
+    """Constant image around the object -> skimage default LBP code 255
+    for all object pixels (equal neighbours compare as true), so the
+    distribution collapses to one value -> std 0, energy 1, entropy 0."""
     ef = _load_extract()
     masks = np.zeros((30, 30), dtype=np.int32)
     _disk(masks, 15, 15, 6, 1)
@@ -435,6 +435,145 @@ def test_glrlm_3x3_uniform_object_matches_hand_computation():
     assert p["glrlm_glnu"][0] == pytest.approx(16.0, rel=1e-9)
     assert p["glrlm_lglre"][0] == pytest.approx(1.0 / 81.0, rel=1e-9)
     assert p["glrlm_hglre"][0] == pytest.approx(81.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Spatial neighbours (cKDTree on centroids)
+# ---------------------------------------------------------------------------
+
+
+def test_neighbours_four_objects_on_a_grid():
+    """Four small disks at the corners of a 30-pixel square. Closest
+    neighbour distance is the side (30); the 4th corner is at the diagonal
+    (30*sqrt(2) ~ 42.4). With k=3 there are exactly two side-neighbours
+    plus one diagonal -> mean = (30 + 30 + 42.4) / 3 ~ 34.14."""
+    ef = _load_extract()
+    H = W = 60
+    masks = np.zeros((H, W), dtype=np.int32)
+    for i, (cy, cx) in enumerate(
+        [(15, 15), (15, 45), (45, 15), (45, 45)], start=1
+    ):
+        _disk(masks, cy, cx, 3, label=i)
+    img = np.full((H, W), 100.0, dtype=np.float32)
+    pd = ef.run(_pd(masks, img), {}, extras=["neighbours"],
+                neighbour_k=3, neighbour_radii=[5, 35, 100])
+    p = pd["extract_features"]["properties"]
+    assert np.allclose(p["nn_distance"], 30.0, atol=0.5)
+    assert np.allclose(
+        p["nn3_mean_distance"], (30 + 30 + 30 * np.sqrt(2)) / 3, atol=0.5
+    )
+    assert list(p["neighbours_within_5"]) == [0, 0, 0, 0]
+    assert list(p["neighbours_within_35"]) == [2, 2, 2, 2]   # only the two sides
+    assert list(p["neighbours_within_100"]) == [3, 3, 3, 3]  # all others
+
+
+def test_neighbours_single_object_returns_nan_and_zero_counts():
+    ef = _load_extract()
+    masks = np.zeros((20, 20), dtype=np.int32)
+    _disk(masks, 10, 10, 4, 1)
+    img = np.full((20, 20), 100.0, dtype=np.float32)
+    pd = ef.run(_pd(masks, img), {}, extras=["neighbours"],
+                neighbour_radii=[5, 50])
+    p = pd["extract_features"]["properties"]
+    assert np.isnan(p["nn_distance"][0])
+    assert np.isnan(p["nn5_mean_distance"][0])
+    assert p["neighbours_within_5"][0] == 0
+    assert p["neighbours_within_50"][0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Group selectors (morphology / intensity / spatial / texture / all)
+# ---------------------------------------------------------------------------
+
+
+def test_extras_group_texture_expands_to_all_five_texture_families():
+    ef = _load_extract()
+    masks = np.zeros((40, 40), dtype=np.int32)
+    _disk(masks, 20, 20, 8, 1)
+    img = np.full((40, 40), 100, dtype=np.uint8)
+    pd = ef.run(_pd(masks, img), {}, extras=["texture"])
+    p = pd["extract_features"]["properties"]
+    # one column from each texture family
+    for col in ("prewitt_magnitude_mean",        # gradients
+                "intensity_uniformity",           # stat_texture
+                "lbp_mean",                       # lbp
+                "fft_mean",                       # fft
+                "glrlm_rlnu"):                    # glrlm
+        assert col in p, f"texture group missing {col}"
+
+
+def test_extras_group_intensity_expands_to_global_and_local_bg():
+    ef = _load_extract()
+    masks = np.zeros((40, 40), dtype=np.int32)
+    _disk(masks, 20, 20, 8, 1)
+    img = np.full((40, 40), 5.0, dtype=np.float32)
+    img[masks > 0] = 100.0
+    pd = ef.run(_pd(masks, img), {}, extras=["intensity"])
+    p = pd["extract_features"]["properties"]
+    assert "bg_global_mean" in p
+    assert "bg_local_mean" in p
+    assert "mean_minus_local_bg" in p
+
+
+def test_extras_group_spatial_expands_to_neighbours():
+    ef = _load_extract()
+    masks = np.zeros((40, 60), dtype=np.int32)
+    _disk(masks, 20, 15, 4, label=1)
+    _disk(masks, 20, 45, 4, label=2)
+    img = np.full(masks.shape, 100.0, dtype=np.float32)
+    pd = ef.run(_pd(masks, img), {}, extras=["spatial"])
+    p = pd["extract_features"]["properties"]
+    assert "nn_distance" in p
+    assert "neighbours_within_50" in p
+
+
+def test_extras_group_morphology_expands_to_rg_spread():
+    ef = _load_extract()
+    masks = np.zeros((40, 40), dtype=np.int32)
+    _disk(masks, 20, 20, 8, 1)
+    img = np.full((40, 40), 100.0, dtype=np.float32)
+    pd = ef.run(_pd(masks, img), {}, extras=["morphology"])
+    p = pd["extract_features"]["properties"]
+    assert "radius_of_gyration" in p
+    assert "intensity_radial_variance_normalised" in p
+
+
+def test_extras_group_all_emits_every_extra_column():
+    ef = _load_extract()
+    masks = np.zeros((50, 80), dtype=np.int32)
+    _disk(masks, 25, 20, 5, label=1)
+    _disk(masks, 25, 60, 5, label=2)
+    img = np.full(masks.shape, 5.0, dtype=np.float32)
+    img[masks > 0] = 100.0
+    pd = ef.run(_pd(masks, img), {}, extras=["all"])
+    p = pd["extract_features"]["properties"]
+    # one representative column from every extra
+    for col in ("bg_global_mean", "bg_local_mean", "nn_distance",
+                "prewitt_magnitude_mean", "intensity_uniformity",
+                "lbp_mean", "fft_mean", "glrlm_rlnu",
+                "radius_of_gyration"):
+        assert col in p, f"'all' group missing {col}"
+
+
+def test_extras_groups_and_individual_extras_can_mix():
+    ef = _load_extract()
+    masks = np.zeros((40, 40), dtype=np.int32)
+    _disk(masks, 20, 20, 8, 1)
+    img = np.full((40, 40), 100.0, dtype=np.float32)
+    # group + individual; should de-dupe and run both.
+    pd = ef.run(_pd(masks, img), {}, extras=["morphology", "global_bg"])
+    p = pd["extract_features"]["properties"]
+    assert "radius_of_gyration" in p
+    assert "bg_global_mean" in p
+
+
+def test_unknown_group_raises_with_helpful_message():
+    ef = _load_extract()
+    masks = np.zeros((20, 20), dtype=np.int32)
+    _disk(masks, 10, 10, 5, 1)
+    img = np.full((20, 20), 50.0, dtype=np.float32)
+    with pytest.raises(ValueError, match="Unknown extras"):
+        ef.run(_pd(masks, img), {}, extras=["bogus_group"])
 
 
 def test_pixel_size_um_scales_area_but_intensity_total_is_unit_safe():
