@@ -482,7 +482,7 @@ def test_neighbours_single_object_returns_nan_and_zero_counts():
 
 
 # ---------------------------------------------------------------------------
-# Group selectors (morphology / intensity / spatial / texture / all)
+# Group selectors (morphology / intensity / neighbourhood / texture / all)
 # ---------------------------------------------------------------------------
 
 
@@ -515,13 +515,13 @@ def test_extras_group_intensity_expands_to_global_and_local_bg():
     assert "mean_minus_local_bg" in p
 
 
-def test_extras_group_spatial_expands_to_neighbours():
+def test_extras_group_neighbourhood_expands_to_neighbours():
     ef = _load_extract()
     masks = np.zeros((40, 60), dtype=np.int32)
     _disk(masks, 20, 15, 4, label=1)
     _disk(masks, 20, 45, 4, label=2)
     img = np.full(masks.shape, 100.0, dtype=np.float32)
-    pd = ef.run(_pd(masks, img), {}, extras=["spatial"])
+    pd = ef.run(_pd(masks, img), {}, extras=["neighbourhood"])
     p = pd["extract_features"]["properties"]
     assert "nn_distance" in p
     assert "neighbours_within_50" in p
