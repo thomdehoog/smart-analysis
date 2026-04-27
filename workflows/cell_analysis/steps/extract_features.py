@@ -18,6 +18,19 @@ Opt-in via the ``extras`` parameter (list of group names):
     "stat_texture"  per-object intensity histogram statistics computed in one
                     vectorised pass; adds intensity_uniformity,
                     intensity_entropy, intensity_skewness, intensity_kurtosis.
+    "lbp"           local binary pattern image (P=8, R=1, default method) +
+                    six per-object histogram statistics; adds lbp_mean,
+                    lbp_std, lbp_energy, lbp_entropy, lbp_skewness,
+                    lbp_kurtosis.
+    "fft"           per-object 2D FFT on the bbox crop with the object mask
+                    applied; six statistics over the magnitude spectrum;
+                    adds fft_mean, fft_std, fft_energy, fft_entropy,
+                    fft_skewness, fft_kurtosis. Entropy uses a 256-bin
+                    histogram of magnitudes.
+    "glrlm"         gray-level run-length matrix summed over four
+                    directions (horizontal, vertical, +45, -45) with
+                    one-based gray-level indexing to keep LGLRE finite;
+                    adds glrlm_rlnu, glrlm_lglre, glrlm_hglre, glrlm_glnu.
     "rg_spread"     radius of gyration + normalised intensity radial variance,
                     computed from bbox-local coordinates (no regionprops
                     ``coords`` materialisation); adds radius_of_gyration,
@@ -38,6 +51,12 @@ Parameters (via YAML / **params)
                        remains a true integrated intensity regardless.
     bg_radius        : int, default 5. Collar width in pixels for local_bg.
     n_intensity_bins : int, default 256. Histogram bins for stat_texture.
+    lbp_P            : int, default 8.   Number of LBP sample points.
+    lbp_R            : float, default 1. LBP sample radius in pixels.
+    lbp_method       : str, default "default". skimage local_binary_pattern
+                       method ("default" / "ror" / "uniform" / "var").
+    glrlm_levels     : int, default 16. Gray levels for the run-length matrix.
+    fft_entropy_bins : int, default 256. Magnitude histogram bins for fft.
 
 Outputs (under pipeline_data["extract_features"])
     properties : dict[str, ndarray]    per-cell arrays aligned with "label"
@@ -70,7 +89,10 @@ DEFAULT_PROPERTIES = [
 ]
 
 
-_VALID_EXTRAS = {"global_bg", "local_bg", "gradients", "stat_texture", "rg_spread"}
+_VALID_EXTRAS = {
+    "global_bg", "local_bg", "gradients", "stat_texture", "rg_spread",
+    "lbp", "fft", "glrlm",
+}
 
 
 def run(pipeline_data: dict, state: dict, **params) -> dict:
@@ -81,8 +103,6 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     properties = list(params.get("properties", DEFAULT_PROPERTIES))
     extras = list(params.get("extras", []) or [])
     pixel_size_um = params.get("pixel_size_um")
-    bg_radius = int(params.get("bg_radius", 5))
-    n_bins = int(params.get("n_intensity_bins", 256))
 
     unknown = set(extras) - _VALID_EXTRAS
     if unknown:
@@ -105,8 +125,7 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     if n_cells > 0:
         _add_derived(props)
         if extras:
-            _add_extras(props, masks, img, labels, extras,
-                        bg_radius, n_bins, pixel_size_um)
+            _add_extras(props, masks, img, labels, extras, params, pixel_size_um)
 
     if verbose >= 2:
         print(f"  [extract_features] cells: {n_cells}, "
@@ -162,11 +181,13 @@ def _add_derived(props: dict) -> None:
 # Opt-in extras dispatcher.
 # ---------------------------------------------------------------------------
 
-def _add_extras(props, masks, img, labels, extras,
-                bg_radius, n_bins, pixel_size_um) -> None:
+_BBOX_EXTRAS = {"local_bg", "rg_spread", "lbp", "fft", "glrlm"}
+
+
+def _add_extras(props, masks, img, labels, extras, params, pixel_size_um) -> None:
     from scipy.ndimage import find_objects
 
-    slices = find_objects(masks) if {"local_bg", "rg_spread"} & set(extras) else None
+    slices = find_objects(masks) if _BBOX_EXTRAS & set(extras) else None
 
     if "global_bg" in extras:
         bg_pixels = img[masks == 0]
@@ -174,13 +195,29 @@ def _add_extras(props, masks, img, labels, extras,
         props["bg_global_mean"] = np.full(len(labels), scalar)
 
     if "local_bg" in extras:
-        _add_local_bg(props, masks, img, slices, labels, bg_radius)
+        _add_local_bg(props, masks, img, slices, labels,
+                      int(params.get("bg_radius", 5)))
 
     if "gradients" in extras:
         _add_gradients(props, masks, img, labels)
 
     if "stat_texture" in extras:
-        _add_stat_texture(props, masks, img, labels, n_bins)
+        _add_stat_texture(props, masks, img, labels,
+                          int(params.get("n_intensity_bins", 256)))
+
+    if "lbp" in extras:
+        _add_lbp(props, masks, img, slices, labels,
+                 P=int(params.get("lbp_P", 8)),
+                 R=float(params.get("lbp_R", 1)),
+                 method=str(params.get("lbp_method", "default")))
+
+    if "fft" in extras:
+        _add_fft(props, masks, img, slices, labels,
+                 n_bins=int(params.get("fft_entropy_bins", 256)))
+
+    if "glrlm" in extras:
+        _add_glrlm(props, masks, img, slices, labels,
+                   n_levels=int(params.get("glrlm_levels", 16)))
 
     if "rg_spread" in extras:
         _add_rg_spread(props, masks, img, slices, labels, pixel_size_um)
@@ -354,3 +391,177 @@ def _add_rg_spread(props, masks, img, slices, labels, pixel_size_um) -> None:
 
     props["radius_of_gyration"] = rg
     props["intensity_radial_variance_normalised"] = spread
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _to_uint8(img):
+    """Map any non-negative image to uint8 [0, 255] for texture computations."""
+    arr = np.asarray(img)
+    if arr.dtype == np.uint8:
+        return arr
+    vmax = float(arr.max()) if arr.size else 1.0
+    if vmax <= 0:
+        vmax = 1.0
+    return np.clip(arr.astype(np.float64) / vmax * 255.0, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Local Binary Patterns: image computed once, six per-object stats.
+# ---------------------------------------------------------------------------
+
+def _add_lbp(props, masks, img, slices, labels, P, R, method) -> None:
+    from skimage.feature import local_binary_pattern
+    from skimage.measure import shannon_entropy
+    from scipy.stats import skew as sstat_skew, kurtosis as sstat_kurt
+
+    lbp = local_binary_pattern(_to_uint8(img), P=P, R=R, method=method).astype(np.int32)
+
+    n = len(labels)
+    arr = np.full((n, 6), np.nan, dtype=np.float64)
+    for i, lab in enumerate(labels):
+        sl = slices[int(lab) - 1]
+        if sl is None:
+            continue
+        v = lbp[sl][masks[sl] == lab]
+        if v.size == 0:
+            continue
+        arr[i, 0] = v.mean()
+        arr[i, 1] = v.std()
+        h = np.bincount(v.astype(np.int64))
+        if h.sum() > 0:
+            p = h / h.sum()
+            arr[i, 2] = float((p * p).sum())
+        arr[i, 3] = float(shannon_entropy(v))
+        if v.size > 1 and v.std() > 0:
+            arr[i, 4] = float(sstat_skew(v))
+            arr[i, 5] = float(sstat_kurt(v, fisher=True, bias=True))
+
+    props["lbp_mean"] = arr[:, 0]
+    props["lbp_std"] = arr[:, 1]
+    props["lbp_energy"] = arr[:, 2]
+    props["lbp_entropy"] = arr[:, 3]
+    props["lbp_skewness"] = arr[:, 4]
+    props["lbp_kurtosis"] = arr[:, 5]
+
+
+# ---------------------------------------------------------------------------
+# Per-object 2D FFT magnitude statistics.
+# Entropy uses an explicit n-bin histogram to keep float magnitudes well-defined.
+# ---------------------------------------------------------------------------
+
+def _add_fft(props, masks, img, slices, labels, n_bins) -> None:
+    from scipy.stats import skew as sstat_skew, kurtosis as sstat_kurt
+
+    n = len(labels)
+    arr = np.full((n, 6), np.nan, dtype=np.float64)
+    for i, lab in enumerate(labels):
+        sl = slices[int(lab) - 1]
+        if sl is None:
+            continue
+        m = masks[sl] == lab
+        if not m.any():
+            continue
+        crop = img[sl].astype(np.float64) * m
+        F = np.abs(np.fft.fftshift(np.fft.fft2(crop)))
+        flat = F.ravel()
+        arr[i, 0] = float(flat.mean())
+        arr[i, 1] = float(flat.std())
+        arr[i, 2] = float((F * F).sum())
+        hist, _ = np.histogram(F, bins=n_bins)
+        s = hist.sum()
+        if s > 0:
+            p = hist / s
+            nz = p > 0
+            arr[i, 3] = float(-(p[nz] * np.log2(p[nz])).sum())
+        if flat.size > 1 and flat.std() > 0:
+            arr[i, 4] = float(sstat_skew(flat))
+            arr[i, 5] = float(sstat_kurt(flat, fisher=True, bias=True))
+
+    props["fft_mean"] = arr[:, 0]
+    props["fft_std"] = arr[:, 1]
+    props["fft_energy"] = arr[:, 2]
+    props["fft_entropy"] = arr[:, 3]
+    props["fft_skewness"] = arr[:, 4]
+    props["fft_kurtosis"] = arr[:, 5]
+
+
+# ---------------------------------------------------------------------------
+# Gray-Level Run-Length Matrix (GLRLM) features.
+# 4 directions summed (0, 45, 90, 135 deg). Background marked as -1 inside the
+# bbox so runs never cross outside the object. Gray levels are 1-based in the
+# matrix to keep LGLRE finite (no divide-by-zero on g=0).
+# ---------------------------------------------------------------------------
+
+def _runs_in_line(line):
+    """Return (gray_levels, run_lengths) from a 1D int array. Pixels marked
+    as negative (background sentinel) are filtered out."""
+    if line.size == 0:
+        return np.empty(0, dtype=line.dtype), np.empty(0, dtype=np.int64)
+    diff = np.diff(line, prepend=line[0] - 1, append=line[-1] + 1)
+    idx = np.flatnonzero(diff)
+    starts = idx[:-1]
+    lengths = np.diff(idx).astype(np.int64)
+    vals = line[starts]
+    valid = vals >= 0
+    return vals[valid], lengths[valid]
+
+
+def _glrlm_matrix_4dir(crop_q, n_levels):
+    """Sum of run-length matrices over 4 directions: 0, 45, 90, 135 deg."""
+    H, W = crop_q.shape
+    if H == 0 or W == 0:
+        return np.zeros((n_levels, 1), dtype=np.int64)
+    P = np.zeros((n_levels, max(H, W)), dtype=np.int64)
+
+    def _accumulate(lines):
+        for line in lines:
+            vals, lens = _runs_in_line(line)
+            if vals.size:
+                np.add.at(P, (vals, lens - 1), 1)
+
+    _accumulate(crop_q)                                                          # 0
+    _accumulate(crop_q.T)                                                        # 90
+    _accumulate([np.diagonal(crop_q, k) for k in range(-H + 1, W)])              # 45
+    _accumulate([np.diagonal(np.fliplr(crop_q), k) for k in range(-H + 1, W)])   # 135
+    return P
+
+
+def _add_glrlm(props, masks, img, slices, labels, n_levels) -> None:
+    img_arr = np.asarray(img)
+    vmax = float(img_arr.max()) if img_arr.size else 1.0
+    if vmax <= 0:
+        vmax = 1.0
+    img_q = np.clip(img_arr.astype(np.float64) / vmax * (n_levels - 1),
+                    0, n_levels - 1).astype(np.int16)
+
+    n = len(labels)
+    arr = np.full((n, 4), np.nan, dtype=np.float64)
+    g = np.arange(1, n_levels + 1, dtype=np.float64)[:, None]
+
+    for i, lab in enumerate(labels):
+        sl = slices[int(lab) - 1]
+        if sl is None:
+            continue
+        m = masks[sl] == lab
+        if not m.any():
+            continue
+        crop_q_obj = np.where(m, img_q[sl], -1).astype(np.int16)
+        P = _glrlm_matrix_4dir(crop_q_obj, n_levels).astype(np.float64)
+        TR = float(P.sum())
+        if TR == 0:
+            continue
+        sum_g = P.sum(axis=0)   # over gray levels -> per run length
+        sum_r = P.sum(axis=1)   # over run lengths -> per gray level
+        rlnu = float((sum_g ** 2).sum() / TR)
+        glnu = float((sum_r ** 2).sum() / TR)
+        lglre = float((P / (g ** 2)).sum() / TR)
+        hglre = float((P * (g ** 2)).sum() / TR)
+        arr[i] = [rlnu, lglre, hglre, glnu]
+
+    props["glrlm_rlnu"] = arr[:, 0]
+    props["glrlm_lglre"] = arr[:, 1]
+    props["glrlm_hglre"] = arr[:, 2]
+    props["glrlm_glnu"] = arr[:, 3]

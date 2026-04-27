@@ -336,6 +336,107 @@ def test_unknown_extras_raises():
         ef.run(_pd(masks, img), {}, extras=["bogus_group"])
 
 
+# ---------------------------------------------------------------------------
+# LBP
+# ---------------------------------------------------------------------------
+
+
+def test_lbp_runs_and_emits_six_columns():
+    ef = _load_extract()
+    masks = np.zeros((40, 40), dtype=np.int32)
+    _disk(masks, 20, 20, 8, 1)
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 256, size=(40, 40)).astype(np.uint8)
+    pd = ef.run(_pd(masks, img), {}, extras=["lbp"])
+    p = pd["extract_features"]["properties"]
+    for k in ("lbp_mean", "lbp_std", "lbp_energy", "lbp_entropy",
+              "lbp_skewness", "lbp_kurtosis"):
+        assert k in p
+        assert p[k].shape == (1,)
+        assert np.isfinite(p[k][0])
+
+
+def test_lbp_uniform_object_has_zero_std_and_unit_energy():
+    """Constant intensity inside a disk -> LBP code 0 (or P+1) for centre
+    pixels (no neighbour exceeds), so the LBP distribution collapses to a
+    single value -> std 0, energy 1, entropy 0."""
+    ef = _load_extract()
+    masks = np.zeros((30, 30), dtype=np.int32)
+    _disk(masks, 15, 15, 6, 1)
+    img = np.full((30, 30), 100, dtype=np.uint8)
+    pd = ef.run(_pd(masks, img), {}, extras=["lbp"])
+    p = pd["extract_features"]["properties"]
+    assert p["lbp_std"][0] == pytest.approx(0.0, abs=1e-9)
+    assert p["lbp_energy"][0] == pytest.approx(1.0, abs=1e-9)
+    assert p["lbp_entropy"][0] == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# FFT (hand-computed on a rectangular constant-intensity object)
+# ---------------------------------------------------------------------------
+
+
+def test_fft_constant_rectangle_matches_closed_form():
+    """A 4x4 constant-intensity object that fills its bounding box gives
+    FFT[0,0] = N*I and all other components 0 (constant input). Closed-form
+    statistics of the magnitude spectrum follow."""
+    ef = _load_extract()
+    H = W = 8
+    N_side = 4
+    intensity = 5.0
+    masks = np.zeros((H, W), dtype=np.int32)
+    masks[2:2 + N_side, 2:2 + N_side] = 1
+    img = np.zeros((H, W), dtype=np.float32)
+    img[masks == 1] = intensity
+    pd = ef.run(_pd(masks, img), {}, extras=["fft"])
+    p = pd["extract_features"]["properties"]
+    N = N_side * N_side
+    bbox_n = N_side * N_side
+    dc = N * intensity                                  # = 80
+    expected_mean = dc / bbox_n                         # = 5
+    expected_var = ((dc - expected_mean) ** 2 + (bbox_n - 1) * expected_mean ** 2) / bbox_n
+    expected_std = float(np.sqrt(expected_var))
+    expected_energy = dc ** 2                           # = 6400
+    assert p["fft_mean"][0] == pytest.approx(expected_mean, rel=1e-6)
+    assert p["fft_std"][0] == pytest.approx(expected_std, rel=1e-6)
+    assert p["fft_energy"][0] == pytest.approx(expected_energy, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# GLRLM (hand-computed on a 3x3 constant-intensity object, 4 directions summed)
+# ---------------------------------------------------------------------------
+
+
+def test_glrlm_3x3_uniform_object_matches_hand_computation():
+    """3x3 uniform-intensity object, 4 directions summed, n_levels=16.
+
+    Object fills a single quantised gray level. Run breakdown:
+      - horizontal rows : 3 runs of length 3 -> P[g, 2] += 3
+      - vertical columns: 3 runs of length 3 -> P[g, 2] += 3
+      - 45  diagonals   : lengths [1, 2, 3, 2, 1] -> P[g, 0..2] += [2, 2, 1]
+      - 135 diagonals   : lengths [1, 2, 3, 2, 1] -> P[g, 0..2] += [2, 2, 1]
+    Sums: P[g, 0] = 4, P[g, 1] = 4, P[g, 2] = 8; TR = 16.
+      - RLNU  = (sum_g P)^2 summed over r / TR   = (4^2 + 4^2 + 8^2)/16 = 6
+      - GLNU  = (sum_r P)^2 summed over g / TR   = (4+4+8)^2 / 16        = 16
+      - With g_1-based = 9 (intensity quantises to matrix row 8 = (n_levels-1)/2):
+        LGLRE = (4 + 4 + 8) / 81 / 16 = 1/81
+        HGLRE = (4 + 4 + 8) * 81 / 16 = 81
+    """
+    ef = _load_extract()
+    H = W = 5
+    masks = np.zeros((H, W), dtype=np.int32)
+    masks[1:4, 1:4] = 1                                 # 3x3 object
+    img = np.zeros((H, W), dtype=np.uint8)
+    img[masks == 1] = 8                                 # quantises to row 8
+    img[0, 0] = 15                                      # force vmax = 15
+    pd = ef.run(_pd(masks, img), {}, extras=["glrlm"], glrlm_levels=16)
+    p = pd["extract_features"]["properties"]
+    assert p["glrlm_rlnu"][0] == pytest.approx(6.0, rel=1e-9)
+    assert p["glrlm_glnu"][0] == pytest.approx(16.0, rel=1e-9)
+    assert p["glrlm_lglre"][0] == pytest.approx(1.0 / 81.0, rel=1e-9)
+    assert p["glrlm_hglre"][0] == pytest.approx(81.0, rel=1e-9)
+
+
 def test_pixel_size_um_scales_area_but_intensity_total_is_unit_safe():
     ef = _load_extract()
     masks = np.zeros((40, 40), dtype=np.int32)
