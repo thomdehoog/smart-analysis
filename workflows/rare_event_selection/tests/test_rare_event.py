@@ -1,72 +1,37 @@
+"""Integration tests for the rare_event_selection workflow.
+
+Covers the full preprocess -> segment -> extract_features -> feedback chain
+through the v4 Engine API. Mock variants run anywhere skimage is available.
+Real-cellpose variants need a working cellpose+torch in the active env
+(e.g. dino3_test or SMART--rare_event_selection--main); they are auto-skipped
+otherwise via the cellpose marker.
+
+Run with::
+
+    pytest -m "not cellpose"          # mock + smoke only
+    pytest -m cellpose                # real cellpose
+    pytest                            # everything (cellpose tests skip if unavailable)
 """
-Integration tests for the rare_event_selection workflow.
 
-Tests the full pipeline (preprocess -> segment -> extract_features -> feedback)
-through the v4 Engine API. Uses mock steps for fast testing, and optionally
-runs the real pipeline if cellpose + skimage are available.
-
-Usage:
-    python run_tests.py
-"""
-
-import sys
-import os
-import time
-import textwrap
-import tempfile
+import json
 import shutil
+import tempfile
+import textwrap
+import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(ROOT))
+import pytest
 
-WIDTH = 70
+from engine import Engine
+
 BASE = Path(__file__).parent.parent
-
-
-def _fmt(seconds):
-    if seconds < 0.001:
-        return f"{seconds * 1_000_000:.0f}us"
-    if seconds < 1:
-        return f"{seconds * 1000:.1f}ms"
-    return f"{seconds:.2f}s"
-
-
-def _wait_results(engine, name, expected, timeout=30):
-    t0 = time.monotonic()
-    collected = []
-    while time.monotonic() - t0 < timeout:
-        collected.extend(engine.results(name))
-        if len(collected) >= expected:
-            return collected
-        time.sleep(0.2)
-    return collected
-
-
-def _wait_for_completion(engine, name, expected, timeout=30):
-    """Poll results and status; return as soon as results+failed >= expected.
-
-    Avoids waiting the full timeout when a job has already failed (the
-    failure is recorded in status, not as a result).
-    """
-    t0 = time.monotonic()
-    collected = []
-    while time.monotonic() - t0 < timeout:
-        collected.extend(engine.results(name))
-        s = engine.status(name)
-        if len(collected) + s["failed"] >= expected:
-            return collected, s
-        time.sleep(0.2)
-    return collected, engine.status(name)
 
 
 # ---- Tests with mock steps -------------------------------------------
 
 
-def test_mock_full_pipeline():
+def test_mock_full_pipeline(wait_for_results):
     """Run the full 4-step pipeline with mock steps (no cellpose needed)."""
-    from engine import Engine
-
     tmp = tempfile.mkdtemp()
     try:
         Path(tmp, "preprocess.py").write_text(textwrap.dedent("""
@@ -185,38 +150,27 @@ def test_mock_full_pipeline():
         with Engine() as e:
             e.register("test", str(yaml_path))
             e.submit("test", {})
-            results = _wait_results(e, "test", 1, timeout=15)
+            results = wait_for_results(e, "test", 1, timeout=15)
 
-        if not results:
-            return False, "no results returned"
+        assert results, "no results returned"
 
         r = results[0]
-        if "preprocess" not in r:
-            return False, "preprocess step did not run"
-        if "segment" not in r:
-            return False, "segment step did not run"
-        if "extract_features" not in r:
-            return False, "extract_features step did not run"
-        if "feedback" not in r:
-            return False, "feedback step did not run"
+        assert "preprocess" in r, "preprocess step did not run"
+        assert "segment" in r, "segment step did not run"
+        assert "extract_features" in r, "extract_features step did not run"
+        assert "feedback" in r, "feedback step did not run"
 
         fb = r["feedback"]
-        if fb["n_selected"] < 1:
-            return False, f"no cells selected"
-        if not Path(fb["filepath"]).exists():
-            return False, f"feedback file not written: {fb['filepath']}"
-
-        return True, (f"4-step pipeline: {r['segment']['n_cells']} cells, "
-                      f"{fb['n_selected']} selected, "
-                      f"JSON written to {Path(fb['filepath']).name}")
+        assert fb["n_selected"] >= 1, "no cells selected"
+        assert Path(fb["filepath"]).exists(), (
+            f"feedback file not written: {fb['filepath']}"
+        )
     finally:
         shutil.rmtree(tmp, True)
 
 
-def test_mock_warm_model():
+def test_mock_warm_model(wait_for_results):
     """Segment step reuses model across calls (state dict)."""
-    from engine import Engine
-
     tmp = tempfile.mkdtemp()
     try:
         Path(tmp, "preprocess.py").write_text(textwrap.dedent("""
@@ -258,25 +212,20 @@ def test_mock_warm_model():
             for i in range(5):
                 e.submit("test", {})
                 time.sleep(0.3)
-            results = _wait_results(e, "test", 5, timeout=15)
+            results = wait_for_results(e, "test", 5, timeout=15)
 
-        if len(results) != 5:
-            return False, f"expected 5 results, got {len(results)}"
+        assert len(results) == 5, f"expected 5 results, got {len(results)}"
 
         counts = sorted(r["segment"]["load_count"] for r in results)
-        if counts == [1, 2, 3, 4, 5]:
-            return True, f"model warm: load_counts={counts}"
-        if all(c >= 1 for c in counts):
-            return True, f"model loaded (multi-worker): counts={counts}"
-        return False, f"unexpected counts: {counts}"
+        # Either fully warm (max_workers=1 -> [1,2,3,4,5]) or any non-zero
+        # counts in the multi-worker case.
+        assert all(c >= 1 for c in counts), f"unexpected counts: {counts}"
     finally:
         shutil.rmtree(tmp, True)
 
 
-def test_mock_data_flow_integrity():
+def test_mock_data_flow_integrity(wait_for_results):
     """Verify data flows correctly through all 4 steps."""
-    from engine import Engine
-
     tmp = tempfile.mkdtemp()
     try:
         Path(tmp, "step_a.py").write_text(textwrap.dedent("""
@@ -318,28 +267,25 @@ def test_mock_data_flow_integrity():
         with Engine() as e:
             e.register("test", str(yaml_path))
             e.submit("test", {"seed": 5})
-            results = _wait_results(e, "test", 1, timeout=10)
+            results = wait_for_results(e, "test", 1, timeout=10)
 
-        if not results:
-            return False, "no results"
+        assert results, "no results"
 
         r = results[0]
         # seed=5 -> a=10 -> b=20 -> c=60 -> d=59, chain=[10,20,60]
         expected_chain = [10, 20, 60]
-        if r["d"]["chain"] != expected_chain:
-            return False, f"chain={r['d']['chain']}, expected {expected_chain}"
-        if r["d"]["value"] != 59:
-            return False, f"final value={r['d']['value']}, expected 59"
-
-        return True, f"data chain: {r['d']['chain']} -> {r['d']['value']}"
+        assert r["d"]["chain"] == expected_chain, (
+            f"chain={r['d']['chain']}, expected {expected_chain}"
+        )
+        assert r["d"]["value"] == 59, (
+            f"final value={r['d']['value']}, expected 59"
+        )
     finally:
         shutil.rmtree(tmp, True)
 
 
-def test_mock_multiple_images():
+def test_mock_multiple_images(wait_for_results):
     """Process multiple images concurrently."""
-    from engine import Engine
-
     tmp = tempfile.mkdtemp()
     try:
         Path(tmp, "analyze.py").write_text(textwrap.dedent("""
@@ -367,25 +313,19 @@ def test_mock_multiple_images():
                     "width": 100 + i,
                     "height": 200 + i,
                 })
-            results = _wait_results(e, "test", 20, timeout=30)
+            results = wait_for_results(e, "test", 20, timeout=30)
 
-        if len(results) != 20:
-            return False, f"expected 20 results, got {len(results)}"
+        assert len(results) == 20, f"expected 20 results, got {len(results)}"
 
         ids = sorted(r["result"]["image_id"] for r in results)
         expected = sorted(f"img_{i}" for i in range(20))
-        if ids != expected:
-            return False, "missing or duplicate image ids"
-
-        return True, f"20 images processed concurrently"
+        assert ids == expected, "missing or duplicate image ids"
     finally:
         shutil.rmtree(tmp, True)
 
 
 def test_mock_error_in_pipeline():
     """One step fails; engine records it gracefully."""
-    from engine import Engine
-
     tmp = tempfile.mkdtemp()
     try:
         Path(tmp, "good.py").write_text(textwrap.dedent("""
@@ -413,13 +353,9 @@ def test_mock_error_in_pipeline():
             time.sleep(5)
             status = e.status("test")
 
-        if status["failed"] < 1:
-            return False, f"no failure recorded: {status}"
+        assert status["failed"] >= 1, f"no failure recorded: {status}"
         err = status["failures"][0]["error"]
-        if "segmentation failed" not in err:
-            return False, f"wrong error message: {err}"
-
-        return True, f"error recorded: {err}"
+        assert "segmentation failed" in err, f"wrong error message: {err}"
     finally:
         shutil.rmtree(tmp, True)
 
@@ -427,7 +363,7 @@ def test_mock_error_in_pipeline():
 # ---- Smoke tests with real components (no cellpose) ------------------
 
 
-def test_real_components_smoke():
+def test_real_components_smoke(wait_for_completion):
     """End-to-end smoke test: real preprocess.py + extract_features.py +
     feedback.py from the workflow's steps directory, on real
     skimage.human_mitosis. Cellpose is stubbed with deterministic synthetic
@@ -435,10 +371,7 @@ def test_real_components_smoke():
     try:
         import skimage  # noqa: F401
     except ImportError as exc:
-        return None, f"skipped: {exc}"
-
-    import json
-    from engine import Engine
+        pytest.skip(f"skimage unavailable: {exc}")
 
     real_steps = BASE / "steps"
     tmp = tempfile.mkdtemp()
@@ -492,55 +425,53 @@ def test_real_components_smoke():
         with Engine() as e:
             e.register("smoke", str(yaml_path))
             e.submit("smoke", {"data_source": "skimage.human_mitosis"})
-            results, status = _wait_for_completion(
+            results, status = wait_for_completion(
                 e, "smoke", 1, timeout=60,
             )
 
-        if status["failed"] > 0:
-            return False, f"step failed: {status['failures'][0]['error'][:120]}"
-        if not results:
-            return False, f"no results (status: {status})"
+        assert status["failed"] == 0, (
+            f"step failed: {status['failures'][0]['error'][:120]}"
+            if status["failed"] else ""
+        )
+        assert results, f"no results (status: {status})"
 
         r = results[0]
 
         # Real preprocess.py loaded a real skimage image
         shape = r["preprocess"]["shape"]
-        if shape[0] < 100 or shape[1] < 100:
-            return False, f"preprocess image suspiciously small: {shape}"
-        if r["preprocess"]["data_source"] != "skimage.human_mitosis":
-            return False, "preprocess did not record data source"
+        assert shape[0] >= 100 and shape[1] >= 100, (
+            f"preprocess image suspiciously small: {shape}"
+        )
+        assert r["preprocess"]["data_source"] == "skimage.human_mitosis", (
+            "preprocess did not record data source"
+        )
 
         # Real extract_features.py ran skimage.measure.regionprops_table
         props = r["extract_features"]["properties"]
         n_extracted = len(props["label"])
-        if n_extracted < 1:
-            return False, "extract_features found no cells"
+        assert n_extracted >= 1, "extract_features found no cells"
         required_keys = {
             "label", "area", "centroid-0", "centroid-1", "eccentricity",
             "mean_intensity", "max_intensity", "solidity",
             "major_axis_length", "minor_axis_length",
         }
         missing = required_keys - set(props.keys())
-        if missing:
-            return False, f"regionprops missing keys: {sorted(missing)}"
+        assert not missing, f"regionprops missing keys: {sorted(missing)}"
 
         # Real feedback.py wrote JSON we can read back
         fb_path = Path(r["feedback"]["filepath"])
-        if not fb_path.exists():
-            return False, f"feedback JSON not on disk: {fb_path}"
+        assert fb_path.exists(), f"feedback JSON not on disk: {fb_path}"
         with open(fb_path) as f:
             fb_data = json.load(f)
-        if "cells" not in fb_data:
-            return False, f"feedback JSON missing 'cells' key: {sorted(fb_data)}"
+        assert "cells" in fb_data, (
+            f"feedback JSON missing 'cells' key: {sorted(fb_data)}"
+        )
         n_in_json = len(fb_data["cells"])
-        if n_in_json != r["feedback"]["n_selected"]:
-            return False, (f"feedback count mismatch: "
-                           f"n_selected={r['feedback']['n_selected']} but "
-                           f"JSON has {n_in_json} cells")
-
-        return True, (f"real preprocess+extract+feedback on {shape}: "
-                      f"{n_extracted} cells, {r['feedback']['n_selected']} "
-                      f"selected, JSON OK")
+        assert n_in_json == r["feedback"]["n_selected"], (
+            f"feedback count mismatch: "
+            f"n_selected={r['feedback']['n_selected']} but "
+            f"JSON has {n_in_json} cells"
+        )
     finally:
         shutil.rmtree(tmp, True)
 
@@ -548,65 +479,50 @@ def test_real_components_smoke():
 # ---- Test with real pipeline (requires cellpose + skimage) -----------
 
 
-def test_real_pipeline():
-    """Run the actual rare_event_selection pipeline with real packages.
-    Skipped if cellpose or skimage are not installed in the orchestrator env,
-    or if a torch/scipy DLL conflict prevents cellpose from loading."""
-    try:
-        import cellpose  # noqa: F401
-        import skimage  # noqa: F401
-    except ImportError as exc:
-        return None, f"skipped: {exc}"
-
-    from engine import Engine
-
+def test_real_pipeline_yaml_registers():
+    """The real YAML file registers without errors."""
     yaml_path = str(BASE / "pipelines" / "rare_event_selection_pipeline.yaml")
 
-    try:
-        with Engine() as e:
-            e.register("analysis", yaml_path)
-            e.submit("analysis", {"data_source": "skimage.human_mitosis"})
-            results, status = _wait_for_completion(
-                e, "analysis", 1, timeout=120,
-            )
-
-        if status["failed"] > 0:
-            err = status["failures"][0]["error"]
-            if "DLL" in err or "fbgemm" in err or "WinError" in err:
-                return None, (f"skipped: DLL conflict in orchestrator env "
-                              f"(needs separate env): {err[:80]}")
-            return False, f"failed: {err[:120]}"
-
-        if not results:
-            return False, f"no results within timeout (status: {status})"
-
-        r = results[0]
-        n_cells = r["segment"]["n_cells"]
-        n_selected = r["feedback"]["n_selected"]
-
-        if n_cells < 1:
-            return False, "no cells found"
-        if n_selected < 1:
-            return False, "no cells selected"
-
-        return True, (f"real pipeline: {n_cells} cells segmented, "
-                      f"{n_selected} selected (p99 by area)")
-    finally:
-        pass
+    with Engine() as e:
+        e.register("analysis", yaml_path)
+        e.status("analysis")
 
 
-def test_real_warm_cellpose_model():
+@pytest.mark.cellpose
+@pytest.mark.slow
+@pytest.mark.integration
+def test_real_pipeline(wait_for_completion):
+    """Run the actual rare_event_selection pipeline with real packages."""
+    yaml_path = str(BASE / "pipelines" / "rare_event_selection_pipeline.yaml")
+
+    with Engine() as e:
+        e.register("analysis", yaml_path)
+        e.submit("analysis", {"data_source": "skimage.human_mitosis"})
+        results, status = wait_for_completion(
+            e, "analysis", 1, timeout=120,
+        )
+
+    assert status["failed"] == 0, (
+        f"failed: {status['failures'][0]['error'][:120]}"
+        if status["failed"] else ""
+    )
+    assert results, f"no results within timeout (status: {status})"
+
+    r = results[0]
+    n_cells = r["segment"]["n_cells"]
+    n_selected = r["feedback"]["n_selected"]
+
+    assert n_cells >= 1, "no cells found"
+    assert n_selected >= 1, "no cells selected"
+
+
+@pytest.mark.cellpose
+@pytest.mark.slow
+@pytest.mark.integration
+def test_real_warm_cellpose_model(wait_for_completion):
     """Verify the real CellposeModel persists in state across submits.
     Submits 3 images on max_workers=1; asserts the model was loaded once
     and reused (load_counts==[1,2,3]), and every call segmented cells."""
-    try:
-        import cellpose  # noqa: F401
-        import skimage  # noqa: F401
-    except ImportError as exc:
-        return None, f"skipped: {exc}"
-
-    from engine import Engine
-
     real_steps = BASE / "steps"
     tmp = tempfile.mkdtemp()
     try:
@@ -647,153 +563,26 @@ def test_real_warm_cellpose_model():
 
         with Engine() as e:
             e.register("warm", str(yaml_path))
-            t0 = time.perf_counter()
             for _ in range(3):
                 e.submit("warm", {"data_source": "skimage.human_mitosis"})
-            results, status = _wait_for_completion(
+            results, status = wait_for_completion(
                 e, "warm", 3, timeout=180,
             )
-            elapsed = time.perf_counter() - t0
 
-        if status["failed"] > 0:
-            err = status["failures"][0]["error"]
-            if "DLL" in err or "fbgemm" in err or "WinError" in err:
-                return None, (f"skipped: DLL conflict in orchestrator env "
-                              f"(needs separate env): {err[:80]}")
-            return False, f"failed: {err[:120]}"
-
-        if len(results) != 3:
-            return False, f"expected 3 results, got {len(results)}"
+        assert status["failed"] == 0, (
+            f"failed: {status['failures'][0]['error'][:120]}"
+            if status["failed"] else ""
+        )
+        assert len(results) == 3, f"expected 3 results, got {len(results)}"
 
         load_counts = sorted(r["segment"]["load_count"] for r in results)
         n_cells = [r["segment"]["n_cells"] for r in results]
 
-        if load_counts != [1, 2, 3]:
-            return False, (f"model was reloaded between submits: "
-                           f"load_counts={load_counts}")
-        if not all(n > 0 for n in n_cells):
-            return False, f"some segmentations found no cells: n_cells={n_cells}"
-
-        return True, (f"3x real cellpose on same warm model: "
-                      f"load_counts={load_counts}, n_cells={n_cells}, "
-                      f"total={elapsed:.1f}s")
+        assert load_counts == [1, 2, 3], (
+            f"model was reloaded between submits: load_counts={load_counts}"
+        )
+        assert all(n > 0 for n in n_cells), (
+            f"some segmentations found no cells: n_cells={n_cells}"
+        )
     finally:
         shutil.rmtree(tmp, True)
-
-
-def test_real_pipeline_yaml_registers():
-    """The real YAML file registers without errors."""
-    from engine import Engine
-
-    yaml_path = str(BASE / "pipelines" / "rare_event_selection_pipeline.yaml")
-
-    try:
-        with Engine() as e:
-            e.register("analysis", yaml_path)
-            status = e.status("analysis")
-        return True, f"registered successfully: {status}"
-    except Exception as exc:
-        return False, f"register failed: {type(exc).__name__}: {exc}"
-
-
-# ---- Runner ----------------------------------------------------------
-
-
-TESTS = [
-    ("Mock: full 4-step pipeline",       test_mock_full_pipeline),
-    ("Mock: warm model (state dict)",    test_mock_warm_model),
-    ("Mock: data flow integrity",        test_mock_data_flow_integrity),
-    ("Mock: multiple images",            test_mock_multiple_images),
-    ("Mock: error handling",             test_mock_error_in_pipeline),
-    ("Smoke: real components (no cellpose)", test_real_components_smoke),
-    ("Real: YAML registers",             test_real_pipeline_yaml_registers),
-    ("Real: full pipeline (cellpose)",   test_real_pipeline),
-    ("Real: warm cellpose model (3x)",   test_real_warm_cellpose_model),
-]
-
-
-def main():
-    import engine
-
-    print()
-    print("=" * WIDTH)
-    print("  Rare Event Selection -- Integration Tests")
-    print("=" * WIDTH)
-    print()
-    print(f"  Engine:   {engine.__version__}")
-    print(f"  Python:   {sys.version.split()[0]} ({sys.executable})")
-    print()
-
-    t_total = time.perf_counter()
-    results = []
-
-    for i, (name, func) in enumerate(TESTS, 1):
-        print("-" * WIDTH)
-        print(f"  [{i:2d}/{len(TESTS)}] {name}")
-        print("-" * WIDTH)
-
-        t0 = time.perf_counter()
-        try:
-            passed, detail = func()
-        except Exception as exc:
-            passed = False
-            detail = f"{type(exc).__name__}: {exc}"
-        elapsed = time.perf_counter() - t0
-
-        if passed is None:
-            status = "[SKIP]"
-        elif passed:
-            status = "[ OK ]"
-        else:
-            status = "[FAIL]"
-
-        print(f"  {status}  {detail}  ({_fmt(elapsed)})")
-        print()
-
-        results.append((name, passed, detail, elapsed))
-
-    elapsed_total = time.perf_counter() - t_total
-    n_pass = sum(1 for _, p, _, _ in results if p is True)
-    n_fail = sum(1 for _, p, _, _ in results if p is False)
-    n_skip = sum(1 for _, p, _, _ in results if p is None)
-
-    print("=" * WIDTH)
-    print("  Results")
-    print("=" * WIDTH)
-    print()
-
-    for name, passed, detail, elapsed in results:
-        if passed is None:
-            icon = "[SKIP]"
-        elif passed:
-            icon = "[ OK ]"
-        else:
-            icon = "[FAIL]"
-        print(f"  {icon}  {name:<38s}  {_fmt(elapsed):>8s}")
-
-    print()
-    print(f"  {'_' * (WIDTH - 4)}")
-    print(f"  Passed:  {n_pass}/{len(TESTS)}")
-    print(f"  Failed:  {n_fail}/{len(TESTS)}")
-    if n_skip:
-        print(f"  Skipped: {n_skip}/{len(TESTS)}")
-    print(f"  Time:    {_fmt(elapsed_total)}")
-    print()
-
-    if n_fail == 0:
-        print("  ALL TESTS PASSED")
-    else:
-        print("  SOME TESTS FAILED")
-        print()
-        for name, passed, detail, _ in results:
-            if passed is False:
-                print(f"    ** {name}: {detail}")
-
-    print()
-    print("=" * WIDTH)
-
-    sys.exit(0 if n_fail == 0 else 1)
-
-
-if __name__ == "__main__":
-    main()

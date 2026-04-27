@@ -1,8 +1,10 @@
-# Pipeline Engine Requirements
+# Smart Analysis -- runtime dependencies
+#
+# Project metadata and optional test/dev extras live in pyproject.toml.
+# Install with::
+#
+#     pip install -r requirements.txt          # runtime only
+#     pip install -e .[test]                   # runtime + test deps
+#
 
-# Core dependency
 pyyaml>=6.0
-
-# Optional: for development/testing
-# pytest>=7.0
-# pytest-cov>=4.0

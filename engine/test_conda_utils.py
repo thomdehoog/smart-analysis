@@ -1,16 +1,14 @@
-"""
-Unit tests for conda_utils.
+"""Unit tests for ``engine.conda_utils``.
 
-Run from a conda-enabled terminal:
-    python test_conda_utils.py
-    python -m pytest test_conda_utils.py -v
+Run from a conda-enabled terminal::
+
+    pytest engine/test_conda_utils.py -v
 """
 
-import sys
 import unittest
 from pathlib import Path
 
-from conda_utils import (
+from engine.conda_utils import (
     get_conda_info,
     get_conda_exe,
     env_exists,
