@@ -595,6 +595,92 @@ def test_real_pipeline():
         pass
 
 
+def test_real_warm_cellpose_model():
+    """Verify the real CellposeModel persists in state across submits.
+    Submits 3 images on max_workers=1; asserts the model was loaded once
+    and reused (load_counts==[1,2,3]), and every call segmented cells."""
+    try:
+        import cellpose  # noqa: F401
+        import skimage  # noqa: F401
+    except ImportError as exc:
+        return None, f"skipped: {exc}"
+
+    from engine import Engine
+
+    real_steps = BASE / "steps"
+    tmp = tempfile.mkdtemp()
+    try:
+        # Real preprocess.py loads skimage.human_mitosis
+        shutil.copy2(real_steps / "preprocess.py", tmp)
+
+        # Custom segment that uses real cellpose + a load counter, so we
+        # can prove the model object is reused across submits rather than
+        # reloaded.
+        Path(tmp, "segment.py").write_text(textwrap.dedent("""
+            METADATA = {"max_workers": 1}
+            def run(pd, state, **p):
+                if "model" not in state:
+                    from cellpose import models
+                    state["model"] = models.CellposeModel(gpu=False)
+                    state["load_count"] = 0
+                state["load_count"] += 1
+                img = pd["preprocess"]["image_preprocessed"]
+                masks, flows, styles = state["model"].eval(img)
+                pd["segment"] = {
+                    "n_cells": int(masks.max()),
+                    "load_count": state["load_count"],
+                }
+                return pd
+        """))
+
+        yaml_path = Path(tmp, "pipeline.yaml")
+        yaml_path.write_text(textwrap.dedent(f"""
+            metadata:
+              functions_dir: "{Path(tmp).as_posix()}"
+              verbose: 0
+            wf:
+              - preprocess:
+                  sigma: 1.0
+                  clip_limit: 0.03
+              - segment:
+        """))
+
+        with Engine() as e:
+            e.register("warm", str(yaml_path))
+            t0 = time.perf_counter()
+            for _ in range(3):
+                e.submit("warm", {"data_source": "skimage.human_mitosis"})
+            results, status = _wait_for_completion(
+                e, "warm", 3, timeout=180,
+            )
+            elapsed = time.perf_counter() - t0
+
+        if status["failed"] > 0:
+            err = status["failures"][0]["error"]
+            if "DLL" in err or "fbgemm" in err or "WinError" in err:
+                return None, (f"skipped: DLL conflict in orchestrator env "
+                              f"(needs separate env): {err[:80]}")
+            return False, f"failed: {err[:120]}"
+
+        if len(results) != 3:
+            return False, f"expected 3 results, got {len(results)}"
+
+        load_counts = sorted(r["segment"]["load_count"] for r in results)
+        n_cells = [r["segment"]["n_cells"] for r in results]
+
+        if load_counts != [1, 2, 3]:
+            return False, (f"model was reloaded between submits: "
+                           f"load_counts={load_counts}")
+        if not all(n > 0 for n in n_cells):
+            return False, f"some segmentations found no cells: n_cells={n_cells}"
+
+        return True, (f"3x real cellpose on same warm model: "
+                      f"load_counts={load_counts}, n_cells={n_cells}, "
+                      f"total={elapsed:.1f}s")
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def test_real_pipeline_yaml_registers():
     """The real YAML file registers without errors."""
     from engine import Engine
@@ -622,6 +708,7 @@ TESTS = [
     ("Smoke: real components (no cellpose)", test_real_components_smoke),
     ("Real: YAML registers",             test_real_pipeline_yaml_registers),
     ("Real: full pipeline (cellpose)",   test_real_pipeline),
+    ("Real: warm cellpose model (3x)",   test_real_warm_cellpose_model),
 ]
 
 
