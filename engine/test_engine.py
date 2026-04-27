@@ -94,6 +94,37 @@ def _temp_yaml(content):
     return str(path)
 
 
+def _wait_for_results(engine, name, expected, timeout=30):
+    """Poll engine.results() until expected count is reached or timeout.
+
+    Replaces fixed time.sleep() patterns with bounded polling -- fast when
+    work is fast, robust when it isn't.
+    """
+    t0 = time.monotonic()
+    collected = []
+    while time.monotonic() - t0 < timeout:
+        collected.extend(engine.results(name))
+        if len(collected) >= expected:
+            return collected
+        time.sleep(0.05)
+    return collected
+
+
+def _wait_for_status(engine, name, expected_total, timeout=30):
+    """Poll engine.status() until completed+failed >= expected_total.
+
+    Use when a test cares about pipeline status (failed counts, etc.)
+    rather than draining results.
+    """
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        s = engine.status(name)
+        if s["completed"] + s["failed"] >= expected_total:
+            return s
+        time.sleep(0.05)
+    return engine.status(name)
+
+
 # ---- Errors ----------------------------------------------------------
 
 
@@ -573,8 +604,7 @@ class TestEngineSubmit(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 1, timeout=10)
         self.assertTrue(len(results) > 0)
         self.assertTrue(results[0]["ok"])
 
@@ -594,8 +624,7 @@ class TestEngineSubmit(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 1, timeout=10)
         self.assertEqual(results[0]["s1"], 1)
         self.assertEqual(results[0]["s2"], 2)
 
@@ -615,8 +644,7 @@ class TestEngineSubmit(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 1, timeout=10)
         self.assertEqual(results[0]["saw"], "hello")
 
     def test_input_data(self):
@@ -626,8 +654,7 @@ class TestEngineSubmit(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {"key": "val"})
-            time.sleep(2)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 1, timeout=10)
         self.assertEqual(results[0]["input"]["key"], "val")
 
     def test_params_from_yaml(self):
@@ -641,8 +668,7 @@ class TestEngineSubmit(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 1, timeout=10)
         self.assertEqual(results[0]["x"], 42)
 
     def test_concurrent_submits(self):
@@ -657,8 +683,7 @@ class TestEngineSubmit(unittest.TestCase):
             e.register("test", yaml)
             for i in range(5):
                 e.submit("test", {"job": i})
-            time.sleep(5)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 5, timeout=15)
         self.assertEqual(len(results), 5)
         self.assertEqual(sorted(r["job"] for r in results), list(range(5)))
 
@@ -695,8 +720,7 @@ class TestEngineScopes(unittest.TestCase):
                 e.submit("test", {"tile": i},
                          scope={"group": "R1"},
                          complete=complete)
-            time.sleep(5)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 4, timeout=15)
 
         # Should have 3 Phase 0 results + 1 scoped result
         phase0 = [r for r in results if r.get("_phase") == 0]
@@ -732,8 +756,7 @@ class TestEngineScopes(unittest.TestCase):
                 e.submit("test", {"val": i},
                          scope={"group": "G1"},
                          complete=complete)
-            time.sleep(8)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 6, timeout=20)
 
         scoped = [r for r in results if r.get("_phase") == 1]
         self.assertEqual(len(scoped), 1)
@@ -769,8 +792,7 @@ class TestEngineScopes(unittest.TestCase):
             e.submit("test", {"val": 40}, scope={"group": "B"})
             e.submit("test", {"val": 50}, scope={"group": "B"},
                      complete="group")
-            time.sleep(8)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 7, timeout=20)
 
         scoped = [r for r in results if r.get("_phase") == 1]
         scoped_vals = sorted([tuple(r["vals"]) for r in scoped])
@@ -809,8 +831,7 @@ class TestEngineScopes(unittest.TestCase):
             e.submit("test", {"v": 1}, scope={"group": "G1"})
             e.submit("test", {"v": 2}, scope={"group": "G1"},
                      complete=["group", "all"])
-            time.sleep(8)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 4, timeout=20)
 
         phase2 = [r for r in results if r.get("_phase") == 2]
         self.assertEqual(len(phase2), 1)
@@ -840,12 +861,105 @@ class TestEngineScopes(unittest.TestCase):
             e.submit("test", {"v": 20}, scope={"group": "B"})
             e.submit("test", {"v": 30}, scope={"group": "C"},
                      complete="all")
-            time.sleep(5)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 4, timeout=15)
 
         scoped = [r for r in results if r.get("_phase") == 1]
         self.assertEqual(len(scoped), 1)
         self.assertEqual(scoped[0]["total"], 60)
+
+    def test_failures_reach_scoped_step(self):
+        """Phase 0 failures are aggregated into pipeline_data['failures']
+        for the scoped step to inspect."""
+        _temp_step("""
+            def run(pd, state, **p):
+                if pd["input"]["v"] == 99:
+                    raise ValueError("deliberate failure")
+                pd["v"] = pd["input"]["v"]
+                return pd
+        """, name="fr_step")
+        _temp_step("""
+            def run(pd, state, **p):
+                pd["n_results"] = len(pd["results"])
+                pd["n_failures"] = len(pd["failures"])
+                pd["failure_steps"] = [f.get("step") for f in pd["failures"]]
+                pd["failure_errors"] = [f.get("error") for f in pd["failures"]]
+                return pd
+        """, name="fr_collect")
+        yaml = _temp_yaml("""
+            wf:
+              - fr_step:
+              - fr_collect:
+                  scope: group
+        """)
+        from engine import Engine
+        with Engine() as e:
+            e.register("test", yaml)
+            e.submit("test", {"v": 1}, scope={"group": "G"})
+            e.submit("test", {"v": 99}, scope={"group": "G"})
+            e.submit("test", {"v": 2}, scope={"group": "G"},
+                     complete="group")
+            results = _wait_for_results(e, "test", 3, timeout=15)
+
+        scoped = [r for r in results if r.get("_phase") == 1]
+        self.assertEqual(len(scoped), 1)
+        self.assertEqual(scoped[0]["n_results"], 2)
+        self.assertEqual(scoped[0]["n_failures"], 1)
+        self.assertEqual(scoped[0]["failure_steps"], ["fr_step"])
+        self.assertIn("deliberate failure", scoped[0]["failure_errors"][0])
+
+
+# ---- Engine (environment isolation) ----------------------------------
+
+
+class TestEngineEnvironmentIsolation(unittest.TestCase):
+    """Verify the engine actually launches steps in their declared conda env.
+
+    Requires the SMART--basic_test--env_a conda env (Python 3.10) created
+    by workflows/basic_test/environments/setup_env.py.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from engine.conda_utils import get_conda_info, env_exists
+        cls.env_name = "SMART--basic_test--env_a"
+        # Skip if env_a doesn't exist (don't fail the suite for missing fixture)
+        try:
+            info = get_conda_info()
+        except FileNotFoundError:
+            raise unittest.SkipTest("conda not found")
+        if not env_exists(info, cls.env_name):
+            raise unittest.SkipTest(
+                f"conda env '{cls.env_name}' not found; "
+                f"run workflows/basic_test/environments/setup_env.py"
+            )
+
+    def test_step_runs_in_declared_environment(self):
+        """A step with METADATA={'environment': 'SMART--basic_test--env_a'}
+        runs in env_a's Python (3.10), not the orchestrator's Python."""
+        _temp_step(f"""
+            import sys
+
+            METADATA = {{"environment": "{self.env_name}"}}
+
+            def run(pd, state, **p):
+                pd["py_major"] = sys.version_info[0]
+                pd["py_minor"] = sys.version_info[1]
+                pd["executable"] = sys.executable
+                return pd
+        """, name="env_a_check")
+        yaml = _temp_yaml("wf:\n  - env_a_check:")
+        from engine import Engine
+        with Engine() as e:
+            e.register("test", yaml)
+            e.submit("test", {})
+            results = _wait_for_results(e, "test", 1, timeout=60)
+
+        self.assertEqual(len(results), 1, "step did not execute")
+        self.assertEqual(results[0]["py_major"], 3)
+        self.assertEqual(results[0]["py_minor"], 10,
+                         f"expected Python 3.10 from env_a, "
+                         f"got {results[0]['py_major']}.{results[0]['py_minor']}")
+        self.assertIn(self.env_name, results[0]["executable"])
 
 
 # ---- Engine (results) ------------------------------------------------
@@ -860,8 +974,7 @@ class TestEngineResults(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
-            r1 = e.results("test")
+            r1 = _wait_for_results(e, "test", 1, timeout=10)
             r2 = e.results("test")
         self.assertEqual(len(r1), 1)
         self.assertEqual(len(r2), 0)
@@ -873,8 +986,7 @@ class TestEngineResults(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 1, timeout=10)
         self.assertEqual(results[0]["_phase"], 0)
         self.assertIsNone(results[0]["_scope_level"])
 
@@ -902,8 +1014,7 @@ class TestEngineConcurrency(unittest.TestCase):
             e.register("test", yaml)
             for i in range(20):
                 e.submit("test", {"idx": i})
-            time.sleep(15)
-            results = e.results("test")
+            results = _wait_for_results(e, "test", 20, timeout=30)
         self.assertEqual(len(results), 20)
         self.assertEqual(sorted(r["idx"] for r in results), list(range(20)))
 
@@ -929,8 +1040,7 @@ class TestEngineErrors(unittest.TestCase):
             e.submit("test", {"fail": True})
             e.submit("test", {"fail": False})
             e.submit("test", {"fail": False})
-            time.sleep(5)
-            status = e.status("test")
+            status = _wait_for_status(e, "test", 3, timeout=15)
         self.assertGreaterEqual(status["completed"], 2)
         self.assertGreaterEqual(status["failed"], 1)
 
@@ -943,8 +1053,7 @@ class TestEngineErrors(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(3)
-            status = e.status("test")
+            status = _wait_for_status(e, "test", 1, timeout=10)
         self.assertEqual(status["failed"], 1)
         self.assertTrue(len(status["failures"]) > 0)
         self.assertIn("boom", status["failures"][0]["error"])
@@ -958,8 +1067,7 @@ class TestEngineErrors(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(3)
-            status = e.status("test")
+            status = _wait_for_status(e, "test", 1, timeout=10)
         self.assertEqual(status["failed"], 1)
 
 
@@ -975,16 +1083,29 @@ class TestEngineLifecycle(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
+            results = _wait_for_results(e, "test", 1, timeout=10)
+        self.assertEqual(len(results), 1)
 
-    def test_shutdown_then_submit_raises(self):
+    def test_shutdown_then_register_raises(self):
+        """register() after shutdown raises RuntimeError."""
         from engine import Engine
+        _temp_step("def run(pd, state, **p): return pd", name="shut_reg")
+        yaml = _temp_yaml("wf:\n  - shut_reg:")
         e = Engine()
         e.shutdown()
         with self.assertRaises(RuntimeError):
-            _temp_step("def run(pd, state, **p): return pd", name="shut")
-            yaml = _temp_yaml("wf:\n  - shut:")
             e.register("test", yaml)
+
+    def test_shutdown_then_submit_raises(self):
+        """submit() after shutdown raises RuntimeError."""
+        _temp_step("def run(pd, state, **p): return pd", name="shut_sub")
+        yaml = _temp_yaml("wf:\n  - shut_sub:")
+        from engine import Engine
+        e = Engine()
+        e.register("test", yaml)
+        e.shutdown()
+        with self.assertRaises(RuntimeError):
+            e.submit("test", {})
 
     def test_double_shutdown(self):
         from engine import Engine
@@ -1005,11 +1126,11 @@ class TestEngineStatus(unittest.TestCase):
         with Engine() as e:
             e.register("test", yaml)
             e.submit("test", {})
-            time.sleep(2)
-            status = e.status("test")
+            status = _wait_for_status(e, "test", 1, timeout=10)
         self.assertIn("completed", status)
         self.assertIn("failed", status)
         self.assertIn("pending", status)
+        self.assertEqual(status["completed"], 1)
 
     def test_status_all_pipelines(self):
         _temp_step("def run(pd, state, **p): return pd", name="st2")
@@ -1048,13 +1169,73 @@ class TestEngineMultiPipeline(unittest.TestCase):
             e.register("b", yaml_b)
             e.submit("a", {})
             e.submit("b", {})
-            time.sleep(3)
-            ra = e.results("a")
-            rb = e.results("b")
+            ra = _wait_for_results(e, "a", 1, timeout=10)
+            rb = _wait_for_results(e, "b", 1, timeout=10)
         self.assertEqual(len(ra), 1)
         self.assertEqual(len(rb), 1)
         self.assertEqual(ra[0]["from"], "a")
         self.assertEqual(rb[0]["from"], "b")
+
+
+# ---- Engine (priority) -----------------------------------------------
+
+
+class TestEnginePriority(unittest.TestCase):
+    """Optional priority parameter orders pending jobs."""
+
+    def test_higher_priority_runs_before_lower(self):
+        """High-priority pending jobs execute before low-priority pending ones."""
+        _temp_step("""
+            import time
+            def run(pd, state, **p):
+                time.sleep(0.15)
+                pd["mark"] = pd["input"]["mark"]
+                return pd
+        """, name="prio_step")
+        yaml = _temp_yaml("wf:\n  - prio_step:")
+        from engine import Engine
+        with Engine(max_concurrent=1) as e:
+            e.register("test", yaml)
+            # First submit grabs the only worker thread immediately.
+            e.submit("test", {"mark": "blocker"})
+            time.sleep(0.05)
+            # The next 4 queue up while blocker is mid-flight.
+            e.submit("test", {"mark": "low_a"}, priority=0)
+            e.submit("test", {"mark": "low_b"}, priority=0)
+            e.submit("test", {"mark": "high_a"}, priority=10)
+            e.submit("test", {"mark": "high_b"}, priority=10)
+            results = _wait_for_results(e, "test", 5, timeout=10)
+
+        marks = [r["mark"] for r in results]
+        self.assertEqual(len(marks), 5)
+        self.assertEqual(marks[0], "blocker")
+        # High-priority pending jobs come before low-priority pending ones.
+        idx = {m: i for i, m in enumerate(marks)}
+        self.assertLess(idx["high_a"], idx["low_a"])
+        self.assertLess(idx["high_a"], idx["low_b"])
+        self.assertLess(idx["high_b"], idx["low_a"])
+        self.assertLess(idx["high_b"], idx["low_b"])
+        # FIFO within same priority.
+        self.assertLess(idx["high_a"], idx["high_b"])
+        self.assertLess(idx["low_a"], idx["low_b"])
+
+    def test_default_priority_preserves_fifo(self):
+        """No priority specified -> submission order is preserved."""
+        _temp_step("""
+            def run(pd, state, **p):
+                pd["i"] = pd["input"]["i"]
+                return pd
+        """, name="fifo_step")
+        yaml = _temp_yaml("wf:\n  - fifo_step:")
+        from engine import Engine
+        with Engine(max_concurrent=1) as e:
+            e.register("test", yaml)
+            for i in range(5):
+                e.submit("test", {"i": i})
+            results = _wait_for_results(e, "test", 5, timeout=10)
+
+        order = [r["i"] for r in results]
+        self.assertEqual(order, [0, 1, 2, 3, 4])
 
 
 # ---- Package API -----------------------------------------------------
