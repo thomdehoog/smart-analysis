@@ -4,13 +4,12 @@
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A Python pipeline engine for scientific image analysis. Define multi-step
-workflows in YAML; the engine runs each step in a worker subprocess (in
-the conda env you choose) and passes a shared `pipeline_data` dict
-between them. First-class support for **live adaptive microscopy** —
-tile-by-tile streaming with scoped aggregation that feeds results back
-into acquisition decisions in real time. The same API also runs as a
-plain post-acquisition batch tool.
+A Python pipeline engine for scientific image analysis, built for
+real-time adaptive feedback microscopy. Compose image analysis recipes
+from reusable Python steps and a YAML workflow; each step runs in its
+own conda environment, and recipes can stream tile-by-tile from a live
+microscope, aggregate by region, and feed results back into acquisition.
+The same API also handles post-acquisition batch.
 
 ## Install
 
