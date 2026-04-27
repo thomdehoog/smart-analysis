@@ -9,24 +9,41 @@ real-time adaptive feedback microscopy.
 
 ## Why it exists
 
-- **Live adaptive feedback.** Submit work tile-by-tile as the
-  microscope acquires; aggregate by region as scans complete; feed
-  results back into the next acquisition decision in real time.
-- **Per-step conda environments.** Each step runs in its own conda env
-  via subprocess, so PyTorch, scikit-image, Cellpose, and other clashing
-  native libraries coexist in one workflow without DLL conflicts.
-- **Composable recipes.** Define multi-step workflows in YAML; write
-  each step as a plain Python function. Reuse and remix steps across
-  recipes without rewriting plumbing.
-- **Warm workers for heavy models.** Cellpose, segmentation, and other
-  expensive objects load once and stay hot across submissions, keeping
-  per-tile latency sub-second during live acquisition.
-- **Same API for batch.** Recipes you write for live microscopy also
-  process archived datasets unchanged.
+- **Live adaptive feedback.** Submit each tile to the engine as the
+  microscope acquires it. The engine processes each tile, aggregates
+  when a region is done, and you use the results to decide what to
+  acquire next.
+- **Per-step conda environments.** Each step runs in its own conda
+  environment. Libraries that clash at the OS level (PyTorch,
+  scikit-image, Cellpose) coexist in the same recipe without conflict.
+- **Recipes in YAML.** A recipe is a YAML file listing the steps to
+  run. Each step is a small Python function. Reuse the same step
+  across many recipes.
+- **Warm workers.** Heavy objects like a Cellpose model load once and
+  stay in memory across submissions. Per-tile latency stays low during
+  live acquisition.
+- **Same API for batch.** Recipes written for live microscopy also
+  process saved datasets without changes.
 
 ## What a recipe looks like
 
-**`steps/double_it.py`**
+A recipe has three parts: a YAML file listing the steps, the step
+files themselves, and a short Python runner that submits jobs and
+reads results.
+
+**1. `pipeline.yaml`** — the recipe. Lists the steps in order.
+
+```yaml
+metadata:
+  functions_dir: "./steps"
+
+example:
+  - double_it:
+```
+
+**2. `steps/double_it.py`** — one step. A step reads from
+`pipeline_data`, adds its own outputs, and returns it.
+
 ```python
 METADATA = {"max_workers": 1}
 
@@ -35,22 +52,27 @@ def run(pipeline_data, state, **params):
     return pipeline_data
 ```
 
-**`pipeline.yaml`**
-```yaml
-metadata:
-  functions_dir: "./steps"
-example:
-  - double_it:
-```
+**3. `run.py`** — submit jobs and collect results. The four engine
+methods you'll use most:
 
-**`run.py`**
 ```python
 import time
 from engine import Engine
 
 with Engine() as e:
+    # Register the recipe under a name you'll use to refer to it.
     e.register("example", "pipeline.yaml")
+
+    # Submit a job. Returns immediately; the engine runs it in the
+    # background. Submit as many as you like.
     e.submit("example", {"n": 21})
+
+    # Check progress at any time. Returns counts of pending, running,
+    # completed, and failed jobs, plus details on any failures.
+    print(e.status("example"))
+
+    # Drain finished results. Each call returns whatever has completed
+    # since the last call (and removes it from the queue).
     while not (results := e.results("example")):
         time.sleep(0.05)
 
