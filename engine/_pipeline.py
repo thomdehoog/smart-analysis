@@ -23,11 +23,12 @@ Thread safety
 
 from __future__ import annotations
 
+import heapq
 import logging
 import os
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +37,67 @@ from ._pool import WorkerPool
 from ._run import PipelineState, parse_yaml, split_phases
 
 logger = logging.getLogger(__name__)
+
+
+class _PriorityThreadPool:
+    """Thread pool that dispatches tasks in priority order.
+
+    Higher priority dispatches first; FIFO within the same priority.
+    Compatible subset of ThreadPoolExecutor: ``submit()`` returns a
+    ``concurrent.futures.Future``; ``shutdown(wait=True)`` drains workers.
+    """
+
+    def __init__(self, max_workers):
+        if max_workers < 1:
+            raise ValueError("max_workers must be >= 1")
+        self._heap = []
+        self._lock = threading.Lock()
+        self._not_empty = threading.Condition(self._lock)
+        self._counter = 0
+        self._shutdown = False
+        self._workers = []
+        for i in range(max_workers):
+            t = threading.Thread(
+                target=self._run, name=f"engine-worker-{i}", daemon=True,
+            )
+            self._workers.append(t)
+            t.start()
+
+    def submit(self, fn, *args, priority=0, **kwargs):
+        future = Future()
+        with self._not_empty:
+            if self._shutdown:
+                raise RuntimeError("pool is shut down")
+            self._counter += 1
+            heapq.heappush(
+                self._heap,
+                (-priority, self._counter, future, fn, args, kwargs),
+            )
+            self._not_empty.notify()
+        return future
+
+    def _run(self):
+        while True:
+            with self._not_empty:
+                while not self._heap and not self._shutdown:
+                    self._not_empty.wait()
+                if not self._heap:
+                    return
+                _, _, future, fn, args, kwargs = heapq.heappop(self._heap)
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as e:
+                future.set_exception(e)
+
+    def shutdown(self, wait=True):
+        with self._not_empty:
+            self._shutdown = True
+            self._not_empty.notify_all()
+        if wait:
+            for t in self._workers:
+                t.join()
 
 
 class Engine:
@@ -56,7 +118,7 @@ class Engine:
                  execution_timeout=300.0):
         self.execution_timeout = execution_timeout
         self._pool = WorkerPool(idle_timeout=idle_timeout)
-        self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
+        self._executor = _PriorityThreadPool(max_workers=max_concurrent)
         self._pipelines = {}
         self._accepting = True
         self._lock = threading.Lock()
@@ -161,10 +223,12 @@ class Engine:
         data = data if data is not None else {}
 
         submission_idx = state.next_submission_idx()
+        priority_value = priority if priority is not None else 0
 
         # Submit Phase 0 to thread pool
         future = self._executor.submit(
             self._execute_phase0, state, data, scope, submission_idx,
+            priority=priority_value,
         )
         state.add_job_entry(future, scope, submission_idx)
 
