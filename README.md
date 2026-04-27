@@ -116,6 +116,92 @@ For a fully runnable version of this shape, see
 real workflow this example mirrors) or
 [`examples/`](examples/) (smaller self-contained examples).
 
+## Scope: aggregating across submissions
+
+In live microscopy, you want two kinds of work in the same recipe:
+**per-tile** (segment each tile as it arrives) and **per-region**
+(stitch the tiles together once a whole region is acquired). Scope is
+how the engine knows which submissions belong together.
+
+You tag each submission with a scope label, and you declare on a step
+in the YAML that it should *aggregate* over a scope:
+
+```yaml
+overview:
+  - segment_tile:
+
+  - stitch:
+      scope: group        # this step runs once per scope "group"
+```
+
+```python
+# Three tiles all belong to region R3.
+e.submit("overview", tile1, scope={"group": "R3"})
+e.submit("overview", tile2, scope={"group": "R3"})
+e.submit("overview", tile3, scope={"group": "R3"}, complete="group")
+```
+
+`segment_tile` runs three times, once per submission. When you signal
+`complete="group"` on the last one, the engine collects the three
+results and runs `stitch` **once** with all of them in
+`pipeline_data["results"]`. From the stitch step:
+
+```python
+def run(pipeline_data, state, **params):
+    tile_results = pipeline_data["results"]   # list of 3 dicts
+    pipeline_data["stitch"] = {"n_tiles": len(tile_results)}
+    return pipeline_data
+```
+
+The caller decides when a scope is complete — the microscope knows
+when a region is done acquiring, the engine does not have to guess.
+You can have multiple scope groups in flight at once (`R3`, `R4`, ...);
+they aggregate independently.
+
+## Isolation: where each step runs
+
+Every step in v4 runs in a worker subprocess — the engine itself never
+runs step code. There are two modes of isolation, and you choose
+per step by what you put in the step's `METADATA`.
+
+**Process isolation (default).** No `environment` declared. The worker
+runs in the same conda environment as the orchestrator, but in its own
+subprocess. A step that segfaults, hangs, or runs out of memory cannot
+take down the engine — only its own job fails.
+
+```python
+# steps/preprocess.py
+METADATA = {"max_workers": 4}      # no "environment" key
+
+def run(pipeline_data, state, **params):
+    ...
+```
+
+**Environment isolation.** Add `environment` to METADATA and the worker
+spawns in a different conda env. This lets you put PyTorch in one env,
+scikit-image in another, and a step that needs both imports neither in
+the orchestrator. You also get crash isolation (still in a subprocess).
+
+```python
+# steps/segment.py
+from cellpose import models       # safe: never imported in the orchestrator
+
+METADATA = {
+    "environment": "SMART--my_workflow--main",
+    "max_workers": 1,              # only one Cellpose model at a time
+}
+
+def run(pipeline_data, state, **params):
+    if "model" not in state:
+        state["model"] = models.CellposeModel(gpu=True)
+    masks, _, _ = state["model"].eval(pipeline_data["preprocess"]["image"])
+    ...
+```
+
+The model loads once on cold start and stays in `state["model"]` until
+the worker is reaped (default: 5 min idle), so per-tile latency stays
+low across many submissions.
+
 ## Install and test
 
 ```bash
