@@ -1,0 +1,14 @@
+# Per-tile cellpose segmentation + top-N pick selection.
+# v0 vertical slice: stub steps that register cleanly so preflight
+# can call engine.register("overview", ...). Real bodies land when
+# Step 4 of the notebook is implemented.
+
+metadata:
+  purpose: "Per-tile cellpose segmentation + top-N pick selection (stub)"
+  version: "0.1"
+  verbose: 1
+  functions_dir: "../steps"
+
+overview:
+  - segment_tile:
+  - pick_targets:
