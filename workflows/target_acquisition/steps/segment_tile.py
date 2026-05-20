@@ -34,7 +34,7 @@ Outputs (under pipeline_data["segment_tile"])
 
 METADATA = {
     "max_workers": 1,
-    "environment": "SMART--target_acquisition--main",
+    "environment": "dino3_test",
 }
 
 
