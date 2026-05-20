@@ -1,15 +1,10 @@
 """segment_tile -- cellpose segmentation for target acquisition overview tiles.
 
-Loads the tile image (acquired or mock), runs cellpose, returns masks.
-The image source is controlled by ``analysis_image_source`` in the
-submission payload: ``"acquired"`` loads the TIFF, ``"skimage_human_mitosis"``
-uses the scikit-image sample image for repeatable testing.
+Loads the tile image from disk, runs cellpose, returns masks.
 
 Inputs (from submission payload)
     pipeline_data["input"]["image_path"] : str
-        Path to the acquired TIFF (used when source is "acquired").
-    pipeline_data["input"]["analysis_image_source"] : str
-        "acquired" or "skimage_human_mitosis".
+        Path to the acquired TIFF.
 
 Parameters (via YAML / **params)
     diameter : float or None, default None
@@ -28,9 +23,9 @@ Outputs (under pipeline_data["segment_tile"])
         Number of cells detected.
     image_size_px : tuple[int, int]
         (nx, ny) of the actual analysis image.
-    image_source : str
-        Which source was used.
 """
+
+import tifffile
 
 METADATA = {
     "max_workers": 1,
@@ -45,15 +40,17 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     gpu = params.get("gpu", False)
 
     inp = pipeline_data["input"]
-    source = inp.get("analysis_image_source", "acquired")
-
-    image = _load_image(source, inp)
+    image = tifffile.imread(inp["image_path"])
     image_2d = _ensure_2d(image, channel)
     ny, nx = image_2d.shape
 
-    from cellpose import models
-
     if "model" not in state:
+        # Lazy import: cellpose pulls in torch (a heavy optional
+        # dependency). Importing it only when we actually need to
+        # construct a model lets tests stub state["model"] without
+        # requiring a working torch install.
+        from cellpose import models
+
         if verbose >= 2:
             print(f"  [segment_tile] cold start: loading CellposeModel(gpu={gpu})")
         state["model"] = models.CellposeModel(gpu=gpu)
@@ -61,32 +58,15 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     masks, flows, styles = state["model"].eval(image_2d, diameter=diameter)
     n_cells = int(masks.max())
 
-    print(f"  [segment_tile] source={source}, image={nx}x{ny}, cells={n_cells}")
+    print(f"  [segment_tile] image={nx}x{ny}, cells={n_cells}")
 
     pipeline_data["segment_tile"] = {
         "image_2d": image_2d,
         "masks": masks,
         "n_cells": n_cells,
         "image_size_px": (nx, ny),
-        "image_source": source,
     }
     return pipeline_data
-
-
-def _load_image(source: str, inp: dict):
-    import tifffile
-
-    if source == "acquired":
-        image_path = inp["image_path"]
-        return tifffile.imread(image_path)
-
-    if source == "skimage_human_mitosis":
-        from skimage.data import human_mitosis
-        return human_mitosis()
-
-    raise ValueError(
-        f"Unknown analysis_image_source: {source!r}. "
-        f"Expected 'acquired' or 'skimage_human_mitosis'.")
 
 
 def _ensure_2d(image, channel: int):

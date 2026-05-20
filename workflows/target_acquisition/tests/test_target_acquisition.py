@@ -49,7 +49,13 @@ def _make_image(mask):
 
 
 def _make_segment_tile_output(mask, image=None):
-    """Build a segment_tile output dict from a mask."""
+    """Build a segment_tile output dict from a mask.
+
+    The dict mirrors segment_tile.run's return contract: image_2d,
+    masks, n_cells, image_size_px. No image_source key -- the engine's
+    response schema dropped that field when the analysis_image_source
+    branch was removed (D1). See TestSegmentTileResponseSchema below.
+    """
     if image is None:
         image = _make_image(mask)
     ny, nx = image.shape[:2]
@@ -59,7 +65,6 @@ def _make_segment_tile_output(mask, image=None):
         "masks": mask,
         "n_cells": n_cells,
         "image_size_px": (nx, ny),
-        "image_source": "test",
     }
 
 
@@ -372,20 +377,74 @@ class TestEnsure2d:
             segment_tile._ensure_2d(img, 0)
 
 
-class TestLoadImage:
+class TestSegmentTileResponseSchema:
+    """Pin the post-D1 segment_tile response contract.
 
-    def test_unknown_source_raises(self):
-        with pytest.raises(ValueError, match="Unknown analysis_image_source"):
-            segment_tile._load_image("bogus", {})
+    Before D1, segment_tile.run returned an ``image_source`` key
+    echoing which input branch (``"acquired"`` / ``"skimage_human_mitosis"``)
+    produced the pixels. After D1 there is no branch -- the engine
+    always reads from ``image_path`` -- so the key is gone from the
+    contract. This test asserts the new shape structurally so a
+    future contributor cannot re-introduce the field without breaking
+    a named test.
+    """
 
-    def test_skimage_human_mitosis_loads(self):
-        img = segment_tile._load_image("skimage_human_mitosis", {})
-        assert img.ndim == 2
-        assert img.shape[0] > 100 and img.shape[1] > 100
+    def test_response_keys_exact(self, tmp_path):
+        # Minimal real-file payload: write a tiny TIFF and let
+        # segment_tile read it through the production file-read path.
+        # _ensure_2d handles the single-plane shape; we don't need
+        # cellpose for this schema test, so we stub it.
+        import tifffile
+        image_path = tmp_path / "tiny.ome.tiff"
+        tifffile.imwrite(image_path, np.zeros((16, 16), dtype=np.uint8))
 
-    def test_acquired_missing_file_raises(self):
-        with pytest.raises(Exception):
-            segment_tile._load_image("acquired", {"image_path": "/no/such/file.tif"})
+        pipeline_data = {
+            "input": {"image_path": str(image_path)},
+            "metadata": {"verbose": 0},
+        }
+        state = {"model": _StubCellposeModel()}
+        result = segment_tile.run(pipeline_data, state)
+        seg = result["segment_tile"]
+        # Exact contract: these four keys, no others. A future
+        # contributor adding back image_source -- or any other
+        # provenance field -- breaks this assertion.
+        assert set(seg.keys()) == {
+            "image_2d", "masks", "n_cells", "image_size_px",
+        }
+
+
+class _StubCellposeModel:
+    """Stub matching cellpose.models.CellposeModel's eval() signature
+    used by segment_tile. Returns an empty mask plus the four-tuple
+    cellpose returns (masks, flows, styles)."""
+    def eval(self, image_2d, diameter=None):
+        return np.zeros(image_2d.shape, dtype=np.int32), None, None
+
+
+class TestSegmentTileIgnoresStaleInputKey:
+    """A pre-D1 caller might still send analysis_image_source in the
+    payload (e.g. a stale notebook). Post-D1 the engine must simply
+    ignore it -- not blow up, not branch, not log the value. This
+    pins forward-compat for stale callers."""
+
+    def test_stale_analysis_image_source_is_ignored(self, tmp_path):
+        import tifffile
+        image_path = tmp_path / "tiny.ome.tiff"
+        tifffile.imwrite(image_path, np.zeros((16, 16), dtype=np.uint8))
+
+        pipeline_data = {
+            "input": {
+                "image_path": str(image_path),
+                "analysis_image_source": "skimage_human_mitosis",  # stale
+            },
+            "metadata": {"verbose": 0},
+        }
+        state = {"model": _StubCellposeModel()}
+        # Must not raise. Must not branch -- segment_tile reads the
+        # file, not skimage. Stub model returns zeros so n_cells == 0.
+        result = segment_tile.run(pipeline_data, state)
+        assert result["segment_tile"]["n_cells"] == 0
+        assert "image_source" not in result["segment_tile"]
 
 
 # ---------------------------------------------------------------------------
@@ -397,14 +456,28 @@ class TestLoadImage:
 @pytest.mark.slow
 class TestCellposeEndToEnd:
 
-    def test_human_mitosis_produces_picks(self):
+    def test_human_mitosis_produces_picks(self, tmp_path):
+        # Pre-D1 this test exercised the engine's
+        # analysis_image_source="skimage_human_mitosis" branch, which
+        # made segment_tile skip the file read and load the skimage
+        # reference image directly. D1 removed that branch -- the
+        # engine now always reads from image_path. Preserve the
+        # useful end-to-end cellpose-on-real-image coverage by
+        # writing human_mitosis() to a temp .ome.tiff and letting
+        # segment_tile read it through the production file-read
+        # path. Same coverage, exercises the same code path a real
+        # LAS X acquisition would.
+        import tifffile
         from skimage.data import human_mitosis
 
         image = human_mitosis()
+        image_path = tmp_path / "human_mitosis.ome.tiff"
+        tifffile.imwrite(image_path, image, photometric="minisblack")
+
         state = {}
         pipeline_data = {
             "input": {
-                "image_path": "<unused>",
+                "image_path": str(image_path),
                 "tile_id": ("0", 0, 0),
                 "tile_stage_xy_um": (10000.0, 15000.0),
                 "tile_zwide_um": 2500.0,
@@ -413,7 +486,6 @@ class TestCellposeEndToEnd:
                 "image_to_stage": [[0.0, -1.0], [1.0, 0.0]],
                 "n_picks": 5,
                 "feature": "area",
-                "analysis_image_source": "skimage_human_mitosis",
             },
             "metadata": {"verbose": 2},
         }
