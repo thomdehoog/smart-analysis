@@ -13,7 +13,8 @@ Inputs
     pipeline_data["input"]["tile_zwide_um"] : float
     pipeline_data["input"]["source_pixel_size_um"] : (pw, ph)
     pipeline_data["input"]["image_to_stage"] : [[a, b], [c, d]]
-    pipeline_data["input"]["n_picks"] : int
+    pipeline_data["input"]["n_picks"] : int | None
+        Number of picks. None returns all cells sorted by label.
     pipeline_data["input"]["feature"] : str
 
 Outputs (under pipeline_data["pick_targets"])
@@ -25,6 +26,7 @@ Outputs (under pipeline_data["pick_targets"])
 METADATA = {"max_workers": 1}
 
 VALID_FEATURES = {"area", "mean_intensity", "eccentricity"}
+SUPPORTS_NONE_NPICKS = True
 
 
 def run(pipeline_data: dict, state: dict, **params) -> dict:
@@ -84,10 +86,14 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
             "cell_source_stage_xy_um": (cell_x, cell_y),
         })
 
-    feature_values = [c[feature if feature != "area" else "area_px"] for c in cells]
-    order = np.argsort(feature_values)[::-1]
-    n = min(int(n_picks), len(cells))
-    selected = [cells[i] for i in order[:n]]
+    if n_picks is None:
+        # Return all cells in a deterministic order for downstream sampling.
+        selected = sorted(cells, key=lambda c: c["label"])
+    else:
+        feature_values = [c[feature if feature != "area" else "area_px"] for c in cells]
+        order = np.argsort(feature_values)[::-1]
+        n = min(int(n_picks), len(cells))
+        selected = [cells[i] for i in order[:n]]
 
     picks = []
     for c in selected:
