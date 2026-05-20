@@ -421,30 +421,52 @@ class _StubCellposeModel:
         return np.zeros(image_2d.shape, dtype=np.int32), None, None
 
 
-class TestSegmentTileIgnoresStaleInputKey:
-    """A pre-D1 caller might still send analysis_image_source in the
-    payload (e.g. a stale notebook). Post-D1 the engine must simply
-    ignore it -- not blow up, not branch, not log the value. This
-    pins forward-compat for stale callers."""
+class TestSegmentTileIgnoresExtraInputKeys:
+    """Engine accepts payloads with extra input keys it doesn't
+    recognize -- doesn't branch, doesn't log, doesn't crash. Pins
+    forward-compatibility for callers that pass through fields the
+    engine has no contract for.
 
-    def test_stale_analysis_image_source_is_ignored(self, tmp_path):
+    Phrased generically rather than naming any specific historical
+    field: the principle (extra keys are silently ignored) stands on
+    its own, and the test doesn't fossilize a field name that the
+    engine has since dropped from its contract.
+    """
+
+    def test_extra_input_keys_are_ignored_engine_reads_image_path(
+        self, tmp_path,
+    ):
         import tifffile
+        # 16x16 sentinel image. If a hidden branch loaded any other
+        # image source (e.g. skimage.data.human_mitosis is ~512x512),
+        # the resulting image_size_px would not match.
         image_path = tmp_path / "tiny.ome.tiff"
         tifffile.imwrite(image_path, np.zeros((16, 16), dtype=np.uint8))
 
         pipeline_data = {
             "input": {
                 "image_path": str(image_path),
-                "analysis_image_source": "skimage_human_mitosis",  # stale
+                # Generic extra key. The engine must not branch on
+                # *any* unrecognized input key; this is the
+                # forward-compat contract.
+                "an_unrecognized_field": "anything",
             },
             "metadata": {"verbose": 0},
         }
         state = {"model": _StubCellposeModel()}
-        # Must not raise. Must not branch -- segment_tile reads the
-        # file, not skimage. Stub model returns zeros so n_cells == 0.
         result = segment_tile.run(pipeline_data, state)
-        assert result["segment_tile"]["n_cells"] == 0
-        assert "image_source" not in result["segment_tile"]
+        seg = result["segment_tile"]
+        # Engine read the 16x16 file -- not anything inferred from
+        # the extra key. A hidden branch loading a different source
+        # would yield a different shape; assertion catches it.
+        assert seg["image_size_px"] == (16, 16)
+        assert seg["image_2d"].shape == (16, 16)
+        assert seg["n_cells"] == 0
+        # Response schema stays clean even when the input carries
+        # extra keys.
+        assert set(seg.keys()) == {
+            "image_2d", "masks", "n_cells", "image_size_px",
+        }
 
 
 # ---------------------------------------------------------------------------
