@@ -528,13 +528,15 @@ private deployment details or repo-specific integration context.
 
 ## Later Work
 
-After the two-phase path works:
+The v1 build contract is intentionally narrow. The forward object
+workflow design now lives in
+[`docs/Object_Workflow_Plan.md`](docs/Object_Workflow_Plan.md), including:
 
-- add deep feature extraction as optional object columns or an optional
-  `embeddings` block
-- add clustering as a target discovery strategy
-- add explicit, tested auto-threshold rules
-- migrate consumers to `object_detection` plus `target_discovery`
-- then decide whether to deprecate or remove the combined workflow
+- the v1 rename to `extract_classical_features` and `build_object_table`
+- optional `extract_deep_features`
+- the two-level tile/object analysis model
+- scalable `tiles/`, `objects/`, and `features/` persistence
+- future target-discovery expansion
 
-Do not mix these later items into the first implementation pass.
+Keep `BUILD_SPEC.md` as the implemented v1 build contract. Keep
+`Object_Workflow_Plan.md` as the living design for the next phases.
