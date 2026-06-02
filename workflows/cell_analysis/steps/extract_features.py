@@ -15,13 +15,12 @@ Architecture
 The module has two user-facing layers, in execution order:
 
 1. **Default features** (always on).
-   The ``DEFAULT_PROPERTIES`` list is passed straight to
-   ``regionprops_table`` for native columns. A small set of cheap
-   derived columns is then added when its source columns exist:
-   circularity, aspect_ratio, orientation_deg, intensity_total, and
-   intensity_cv. Override via the ``properties`` YAML param to trim or
-   extend the native regionprops inputs; dependent derived columns will
-   naturally disappear when their sources are absent.
+   The ``DEFAULT_PROPERTIES`` list defines the default output columns.
+   Native scikit-image columns are passed to ``regionprops_table``; small
+   compatibility columns such as ``intensity_median`` and cheap derived
+   columns are added afterward. Override via the ``properties`` YAML param
+   to trim or extend the native regionprops inputs; dependent derived
+   columns will naturally disappear when their sources are absent.
 
 2. **Opt-in feature groups**.
    Each extra is a self-contained handler that receives a ``_Context``
@@ -114,9 +113,13 @@ METADATA = {
 
 
 # ---------------------------------------------------------------------------
-# Default native feature configuration: the regionprops_table property list. Trim or extend
-# via the ``properties`` YAML parameter.
+# Default feature configuration. Native properties are passed to
+# regionprops_table; compatibility properties in SYNTHETIC_PROPERTIES are
+# computed below so the output contract is stable across scikit-image
+# versions.
 # ---------------------------------------------------------------------------
+
+SYNTHETIC_PROPERTIES = {"intensity_median"}
 
 DEFAULT_PROPERTIES = [
     "label",
@@ -158,9 +161,13 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     img = pipeline_data["preprocess"]["image"]
 
     spacing_kw = {"spacing": tuple(pixel_size_um)} if pixel_size_um else {}
+    native_properties = [
+        prop for prop in properties if prop not in SYNTHETIC_PROPERTIES
+    ]
     props = regionprops_table(
-        masks, intensity_image=img, properties=properties, **spacing_kw
+        masks, intensity_image=img, properties=native_properties, **spacing_kw
     )
+    _add_synthetic_properties(props, masks, img, properties)
 
     labels = np.asarray(props.get("label", []))
     n_cells = int(len(labels))
@@ -179,6 +186,22 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         "n_cells": n_cells,
     }
     return pipeline_data
+
+
+def _add_synthetic_properties(
+    props: dict, masks: np.ndarray, img: np.ndarray, properties: list[str]
+) -> None:
+    """Add requested properties that are not portable regionprops names."""
+    if "intensity_median" not in properties:
+        return
+
+    from skimage.measure import regionprops
+
+    medians = []
+    for region in regionprops(masks, intensity_image=img):
+        values = region.intensity_image[region.image]
+        medians.append(float(np.median(values)) if values.size else np.nan)
+    props["intensity_median"] = np.asarray(medians, dtype=float)
 
 
 # ---------------------------------------------------------------------------

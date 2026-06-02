@@ -39,8 +39,8 @@ engine itself) in the active Python environment. The
 [`workflows/rare_event_selection/environments/setup_env.py`](../rare_event_selection/environments/setup_env.py)
 script installs the same dependency set under
 `SMART--rare_event_selection--main`, which works for this workflow too.
-On a developer machine that already has a cellpose-capable conda env
-(e.g. `dino3_test`), use that.
+If you already have a Cellpose-capable conda environment, you can use
+that instead.
 
 ```bash
 # from a cellpose-capable conda env:
