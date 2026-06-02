@@ -15,7 +15,8 @@ pytest -m "not cellpose and not slow"
 ```
 
 The runtime dependency is `pyyaml`. Test and development extras add
-`pytest`, `psutil`, NumPy, scikit-image, tifffile, and imagecodecs.
+`pytest`, `psutil`, NumPy, scikit-image, pooch, tifffile, and
+imagecodecs.
 
 ## Conda environments for environment-switching tests
 

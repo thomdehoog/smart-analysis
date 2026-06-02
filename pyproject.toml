@@ -17,6 +17,7 @@ dependencies = [
 workflows = [
     "numpy>=1.24",
     "scikit-image>=0.23",
+    "pooch>=1.8",
     "tifffile>=2024.0",
     "imagecodecs>=2024.0",
 ]
@@ -25,6 +26,7 @@ test = [
     "psutil>=5.9",
     "numpy>=1.24",
     "scikit-image>=0.23",
+    "pooch>=1.8",
     "tifffile>=2024.0",
     "imagecodecs>=2024.0",
 ]
