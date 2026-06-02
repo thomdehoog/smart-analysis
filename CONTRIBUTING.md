@@ -8,13 +8,14 @@ expectations for Smart Analysis.
 ```bash
 git clone https://github.com/thomdehoog/smart-analysis.git
 cd smart-analysis
-python -m venv .venv && source .venv/bin/activate    # or use conda
-pip install -e .[test]
-pytest
+conda create -n SMART--analysis-dev python=3.12 -y
+conda activate SMART--analysis-dev
+python -m pip install -e ".[test]"
+pytest -m "not cellpose and not slow"
 ```
 
 The runtime dependency is `pyyaml`. Test and development extras add
-`pytest` and `psutil`.
+`pytest`, `psutil`, NumPy, scikit-image, tifffile, and imagecodecs.
 
 ## Conda environments for environment-switching tests
 
@@ -43,8 +44,9 @@ Cellpose or Torch cannot be imported.
 ## Running tests
 
 ```bash
+pytest -m "not cellpose and not slow"  # fast public smoke test
 pytest                          # everything runnable in this env
-pytest -m "not slow"            # fast subset
+pytest -m "not slow"            # fast subset including Cellpose if available
 pytest -m cellpose              # only real Cellpose tests
 pytest -m adversarial           # stress, race, corruption, protocol tests
 pytest engine/                  # engine unit tests only

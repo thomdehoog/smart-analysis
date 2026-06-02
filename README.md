@@ -34,13 +34,15 @@ rewriting the analysis steps.
 ```bash
 git clone https://github.com/thomdehoog/smart-analysis.git
 cd smart-analysis
-pip install -e .[test]
-pytest
+conda create -n SMART--analysis-dev python=3.12 -y
+conda activate SMART--analysis-dev
+python -m pip install -e ".[test]"
+pytest -m "not cellpose and not slow"
 ```
 
-Python 3.10 or newer is required. Conda is optional for the engine itself
-and required only when a step declares a separate conda environment in its
-`METADATA`.
+Python 3.10 or newer is required. Use conda for local development and
+microscope deployments; the engine's environment switching also relies
+on conda when a step declares a separate environment in its `METADATA`.
 
 ## Minimal workflow
 
@@ -160,6 +162,7 @@ inside the worker environment.
 ## Testing
 
 ```bash
+pytest -m "not cellpose and not slow"
 pytest
 pytest -m "not slow"
 pytest engine/
