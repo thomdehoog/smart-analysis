@@ -909,6 +909,51 @@ class TestEngineScopes(unittest.TestCase):
         self.assertEqual(scoped[0]["failure_steps"], ["fr_step"])
         self.assertIn("deliberate failure", scoped[0]["failure_errors"][0])
 
+    def test_scope_collection_prunes_consumed_failures(self):
+        """Consumed scope failures leave status; unrelated failures remain."""
+        _temp_step("""
+            def run(pd, state, **p):
+                if pd["input"].get("fail"):
+                    raise ValueError(f"failed {pd['input']['group']}")
+                pd["group"] = pd["input"]["group"]
+                return pd
+        """, name="pf_step")
+        _temp_step("""
+            def run(pd, state, **p):
+                pd["n_results"] = len(pd["results"])
+                pd["failure_errors"] = [f["error"] for f in pd["failures"]]
+                return pd
+        """, name="pf_collect")
+        yaml = _temp_yaml("""
+            wf:
+              - pf_step:
+              - pf_collect:
+                  scope: group
+        """)
+        from engine import Engine
+        with Engine() as e:
+            e.register("test", yaml)
+            e.submit("test", {"group": "A", "fail": True},
+                     scope={"group": "A"})
+            e.submit("test", {"group": "B", "fail": True},
+                     scope={"group": "B"})
+            _wait_for_status(e, "test", expected_total=2, timeout=15)
+
+            e.submit("test", {"group": "A", "fail": False},
+                     scope={"group": "A"}, complete="group")
+            results = _wait_for_results(e, "test", 2, timeout=15)
+            status = e.status("test")
+
+        scoped = [r for r in results if r.get("_phase") == 1]
+        self.assertEqual(len(scoped), 1)
+        self.assertEqual(scoped[0]["n_results"], 1)
+        self.assertEqual(len(scoped[0]["failure_errors"]), 1)
+        self.assertIn("failed A", scoped[0]["failure_errors"][0])
+
+        remaining_errors = [f["error"] for f in status["failures"]]
+        self.assertEqual(len(remaining_errors), 1)
+        self.assertIn("failed B", remaining_errors[0])
+
 
 # ---- Engine (environment isolation) ----------------------------------
 

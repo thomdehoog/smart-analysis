@@ -265,6 +265,7 @@ class PipelineState:
                 failures.append(f)
             else:
                 remaining_failures.append(f)
+        self._failures = remaining_failures
 
         return results, failures
 
