@@ -14,9 +14,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+workflows = [
+    "numpy>=1.24",
+    "scikit-image>=0.23",
+    "tifffile>=2024.0",
+    "imagecodecs>=2024.0",
+]
 test = [
     "pytest>=8.0",
     "psutil>=5.9",
+    "numpy>=1.24",
+    "scikit-image>=0.23",
+    "tifffile>=2024.0",
+    "imagecodecs>=2024.0",
 ]
 dev = [
     "smart-analysis[test]",

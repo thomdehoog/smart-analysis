@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import atexit
 import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -218,22 +219,54 @@ def engine_factory():
 # --------------------------------------------------------------------------
 
 
+_CELLPOSE_RUNTIME_CACHE: tuple[bool, str] | None = None
+
+
 def _has_cellpose_runtime() -> tuple[bool, str]:
     """Return (available, reason) for the cellpose runtime in this env.
 
-    Catches every exception (not just ImportError) because broken Windows
-    torch installs raise OSError when loading fbgemm.dll, and other env
-    breakages may surface as RuntimeError or AttributeError.
+    Probe in a subprocess. Broken Windows torch installs can fail while
+    loading native DLLs, which is not always cleanly contained by catching
+    Python exceptions in the pytest process.
     """
+    global _CELLPOSE_RUNTIME_CACHE
+    if _CELLPOSE_RUNTIME_CACHE is not None:
+        return _CELLPOSE_RUNTIME_CACHE
+
+    code = r"""
+import importlib
+import sys
+
+for module in ("skimage", "cellpose.models"):
     try:
-        import skimage  # noqa: F401
+        importlib.import_module(module)
     except Exception as exc:
-        return False, f"skimage unavailable: {type(exc).__name__}: {exc}"
+        print(
+            f"{module} unavailable: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+"""
     try:
-        from cellpose import models  # noqa: F401
-    except Exception as exc:
-        return False, f"cellpose unavailable: {type(exc).__name__}: {exc}"
-    return True, "ok"
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        _CELLPOSE_RUNTIME_CACHE = False, "runtime probe timed out"
+        return _CELLPOSE_RUNTIME_CACHE
+
+    if result.returncode == 0:
+        _CELLPOSE_RUNTIME_CACHE = True, "ok"
+        return _CELLPOSE_RUNTIME_CACHE
+
+    detail = result.stderr.strip() or result.stdout.strip()
+    if not detail:
+        detail = f"runtime probe exited with code {result.returncode}"
+    _CELLPOSE_RUNTIME_CACHE = False, detail
+    return _CELLPOSE_RUNTIME_CACHE
 
 
 @pytest.fixture
@@ -244,6 +277,8 @@ def cellpose_available():
 
 def pytest_collection_modifyitems(config, items):
     """Auto-skip @pytest.mark.cellpose tests when the runtime is unavailable."""
+    if not any("cellpose" in item.keywords for item in items):
+        return
     available, reason = _has_cellpose_runtime()
     if available:
         return
