@@ -28,7 +28,9 @@ Submit an overview under `tiles`:
 
 `feature` must name a column in each tile's object table, such as
 `area`, `intensity_mean`, or `eccentricity`. `direction` is `high` or
-`low`. `n_per_tile=None` returns all valid objects after filtering.
+`low`. `border_margin_px` excludes objects whose bounding boxes cross
+the tile margin. `n_per_tile=None` returns all valid objects after
+filtering.
 
 ## Output
 

@@ -12,4 +12,5 @@ from _features import run  # noqa: E402
 METADATA = {
     "description": "Extract object features for object_detection",
     "version": "1.0",
+    "environment": "SMART--object_detection--main",
 }

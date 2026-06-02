@@ -9,6 +9,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from _contracts import (  # noqa: E402
+    REQUIRED_GEOMETRY_FIELDS,
+    REQUIRED_OBJECT_COLUMNS,
     load_overview,
     save_overview,
     to_builtin,
@@ -78,11 +80,21 @@ def test_row_alignment_is_required_for_all_property_columns():
         validate_tile_detection(tile)
 
 
-def test_missing_required_object_column_fails_clearly():
+@pytest.mark.parametrize("column", REQUIRED_OBJECT_COLUMNS)
+def test_missing_required_object_column_fails_clearly(column):
     tile = make_tile()
-    del tile["objects"]["properties"]["centroid_col_px"]
+    del tile["objects"]["properties"][column]
 
-    with pytest.raises(ValueError, match="centroid_col_px"):
+    with pytest.raises(ValueError, match=column):
+        validate_tile_detection(tile)
+
+
+@pytest.mark.parametrize("field", REQUIRED_GEOMETRY_FIELDS)
+def test_missing_required_geometry_field_fails_clearly(field):
+    tile = make_tile()
+    del tile["geometry"][field]
+
+    with pytest.raises(ValueError, match=field):
         validate_tile_detection(tile)
 
 

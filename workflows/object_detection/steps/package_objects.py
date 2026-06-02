@@ -62,7 +62,6 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     })
 
     pipeline_data["object_detection"] = tile_detection
-    pipeline_data["package_objects"] = tile_detection
     return pipeline_data
 
 

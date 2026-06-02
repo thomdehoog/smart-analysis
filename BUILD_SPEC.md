@@ -377,7 +377,8 @@ V1 behavior:
 - Rank by one feature.
 - Support `direction="high"` and `direction="low"`.
 - Support `n_per_tile`.
-- Support `border_margin_px`.
+- Support `border_margin_px` by excluding objects whose bbox crosses the
+  tile margin.
 - Convert image centroids to stage coordinates per tile.
 - Emit JSON-native `targets`.
 

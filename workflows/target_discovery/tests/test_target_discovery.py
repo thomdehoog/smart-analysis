@@ -90,15 +90,20 @@ def test_explicit_thresholds_filter_before_ranking():
 
 
 def test_border_margin_uses_each_tile_image_size():
+    tile = make_tile()
+    # Label 1 has a safe centroid but a wide bbox crossing the left
+    # margin. Border filtering must use bbox bounds, not centroid alone.
+    tile["objects"]["properties"]["bbox_min_col_px"][0] = 5
+
     targets = run_discovery(
-        [make_tile()],
+        [tile],
         feature="area",
         direction="high",
         n_per_tile=None,
         border_margin_px=10,
     )
 
-    assert [t["object_label"] for t in targets] == [2, 1]
+    assert [t["object_label"] for t in targets] == [2]
 
 
 def test_stage_conversion_reuses_row_col_to_xy_convention():

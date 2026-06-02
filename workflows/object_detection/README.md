@@ -72,8 +72,8 @@ pixel coordinates in row/col order.
 
 ## Environment
 
-`detect_objects` declares the workflow-owned conda environment
-`SMART--object_detection--main`. Build it with:
+`detect_objects` and `extract_object_features` declare the workflow-owned
+conda environment `SMART--object_detection--main`. Build it with:
 
 ```bash
 cd workflows/object_detection/environments

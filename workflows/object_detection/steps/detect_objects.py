@@ -31,6 +31,9 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     )
 
     pipeline_data["detect_objects"] = detection
+    # Bridge to the shared feature extractor's current input contract.
+    # The public object_detection contract is created later by
+    # package_objects; these keys are internal pipeline wiring.
     pipeline_data["preprocess"] = {"image": detection["image_2d"]}
     pipeline_data["segment"] = {
         "masks": detection["masks"],

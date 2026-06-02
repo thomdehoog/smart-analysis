@@ -56,7 +56,6 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
 
     result = validate_targets({"targets": targets})
     pipeline_data["target_discovery"] = result
-    pipeline_data["discover_targets"] = result
     return pipeline_data
 
 
@@ -153,11 +152,15 @@ def _inside_border(
         return True
 
     nx, ny = geometry["source_image_size_px"]
-    row_px = float(props["centroid_row_px"][row])
-    col_px = float(props["centroid_col_px"][row])
+    min_row = float(props["bbox_min_row_px"][row])
+    min_col = float(props["bbox_min_col_px"][row])
+    max_row = float(props["bbox_max_row_px"][row])
+    max_col = float(props["bbox_max_col_px"][row])
     return (
-        border_margin_px <= row_px <= float(ny) - border_margin_px
-        and border_margin_px <= col_px <= float(nx) - border_margin_px
+        border_margin_px <= min_row
+        and border_margin_px <= min_col
+        and max_row <= float(ny) - border_margin_px
+        and max_col <= float(nx) - border_margin_px
     )
 
 

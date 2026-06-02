@@ -103,11 +103,27 @@ def test_empty_detection_output_is_valid():
     assert tile["objects"]["properties"]["label"] == []
 
 
-def test_missing_geometry_field_fails_clearly():
+@pytest.mark.parametrize("field", [
+    "tile_id",
+    "tile_stage_xy_um",
+    "tile_zwide_um",
+    "source_pixel_size_um",
+    "image_to_stage",
+])
+def test_missing_geometry_field_fails_clearly(field):
     pd = _feature_pipeline_data()
-    del pd["input"]["tile_stage_xy_um"]
+    del pd["input"][field]
 
-    with pytest.raises(ValueError, match="tile_stage_xy_um"):
+    with pytest.raises(ValueError, match=field):
+        package_objects.run(pd, {})
+
+
+@pytest.mark.parametrize("column", package_objects.FEATURE_COLUMN_MAP)
+def test_missing_required_feature_column_fails_clearly(column):
+    pd = _feature_pipeline_data()
+    del pd["extract_features"]["properties"][column]
+
+    with pytest.raises(ValueError, match=column):
         package_objects.run(pd, {})
 
 
