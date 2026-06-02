@@ -79,6 +79,20 @@ def test_select_features_percentile_high():
     assert out["cutoff"] == pytest.approx(160.0, abs=1.0)
 
 
+def test_select_features_percentile_low():
+    select = _load_step("select_features")
+    pd = _fake_extract_output()
+    pd = select.run(pd, {}, feature="area", mode="percentile",
+                    percentile=80, direction="low")
+    out = pd["select_features"]
+    # Low-percentile selection mirrors the high case through 100-p:
+    # np.percentile([50,75,100,150,200], 20) is 70, so only 50 survives.
+    assert out["selected_labels"] == [2]
+    assert out["n_selected"] == 1
+    assert out["n_total"] == 5
+    assert out["cutoff"] == pytest.approx(70.0, abs=1.0)
+
+
 def test_select_features_threshold_high():
     select = _load_step("select_features")
     pd = _fake_extract_output()
@@ -108,6 +122,17 @@ def test_select_features_top_n():
     out = pd["select_features"]
     assert sorted(out["selected_labels"]) == [3, 5]   # 200 and 150
     assert out["n_selected"] == 2
+
+
+def test_select_features_top_n_low():
+    select = _load_step("select_features")
+    pd = _fake_extract_output()
+    pd = select.run(pd, {}, feature="area", mode="top_n",
+                    top_n=2, direction="low")
+    out = pd["select_features"]
+    assert out["selected_labels"] == [2, 4]   # 50 and 75, in label row order
+    assert out["n_selected"] == 2
+    assert out["cutoff"] == pytest.approx(75.0)
 
 
 def test_select_features_unknown_feature_raises():

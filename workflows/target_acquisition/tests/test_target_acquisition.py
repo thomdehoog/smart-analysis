@@ -146,6 +146,18 @@ class TestRanking:
         result = pick_targets.run(pd, {})
         assert len(result["pick_targets"]["picks"]) == 3
 
+    def test_n_picks_none_returns_all_in_label_order(self):
+        mask = _make_mask(
+            (10, 10, 10, 10, 1),
+            (10, 100, 40, 40, 2),
+            (10, 200, 20, 20, 3),
+        )
+        pd = _make_pipeline_data(mask, n_picks=None, feature="area")
+        result = pick_targets.run(pd, {})
+        picks = result["pick_targets"]["picks"]
+        assert len(picks) == 3
+        assert [p["pick_id"][3] for p in picks] == [1, 2, 3]
+
 
 class TestCentroidSwap:
     """skimage centroid is (row, col) — pick format is (col, row)."""

@@ -305,6 +305,7 @@ def test_label_id_gaps_keep_per_label_alignment():
     p = pd["extract_features"]["properties"]
     assert list(p["label"]) == [1, 3, 5]
     assert p["intensity_mean"].tolist() == pytest.approx([10.0, 30.0, 50.0])
+    assert p["intensity_median"].tolist() == pytest.approx([10.0, 30.0, 50.0])
     assert np.all(np.isfinite(p["radius_of_gyration"]))
 
 
@@ -325,6 +326,9 @@ def test_no_objects_returns_empty_output():
     img = np.full((20, 20), 50.0, dtype=np.float32)
     pd = ef.run(_pd(masks, img), {})
     assert pd["extract_features"]["n_cells"] == 0
+    p = pd["extract_features"]["properties"]
+    assert p["label"].tolist() == []
+    assert p["intensity_median"].tolist() == []
 
 
 def test_unknown_extras_raises():
