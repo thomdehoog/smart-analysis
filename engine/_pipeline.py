@@ -290,7 +290,18 @@ class Engine:
         return state.drain_results()
 
     def shutdown(self, wait=True):
-        """Shut down the engine, thread pool, and all workers."""
+        """Shut down the engine, thread pool, and all workers.
+
+        Parameters
+        ----------
+        wait : bool, optional
+            If True, wait for queued engine tasks to finish before the
+            thread pool returns. Worker shutdown is always requested.
+
+        Returns
+        -------
+        None
+        """
         logger.info("Engine shutting down (wait=%s)", wait)
         self._accepting = False
         self._executor.shutdown(wait=wait)
