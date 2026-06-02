@@ -1,7 +1,8 @@
 # Build Spec: Object Detection and Target Discovery Workflows
 
-This document defines the next workflow split for Smart Analysis. It is
-intended as the implementation contract before code is written.
+This document defines the workflow split for Smart Analysis. It records
+the implementation contract for the object-detection and
+target-discovery path.
 
 The goal is a simple, internally consistent foundation:
 

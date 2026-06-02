@@ -1,0 +1,17 @@
+# Detect and measure all objects in one acquired image tile.
+
+metadata:
+  purpose: "Object detection and characterization"
+  version: "1.0"
+  verbose: 1
+  functions_dir: "../steps"
+
+object_detection:
+  - detect_objects:
+      diameter: null
+      channel: 0
+      gpu: false
+
+  - extract_object_features:
+
+  - package_objects:

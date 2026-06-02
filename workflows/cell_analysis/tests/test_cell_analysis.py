@@ -176,12 +176,18 @@ def test_pipeline_mock_smoke_end_to_end(temp_yaml, wait_for_completion):
         image_path = Path(tmp, "synthetic_smoke.tif")
         tifffile.imwrite(image_path, image, photometric="minisblack")
 
+        # Keep the standard workflow layout so shared-module wrappers
+        # resolve Path(__file__).parents[2] to a workflows/ root.
+        workflows_tmp = Path(tmp, "workflows")
+        steps_tmp = workflows_tmp / "cell_analysis" / "steps"
+        steps_tmp.mkdir(parents=True)
+        shutil.copy2(WORKFLOW.parent / "_features.py", workflows_tmp)
         for name in ("preprocess.py", "extract_features.py",
                      "select_features.py"):
-            shutil.copy2(STEPS_DIR / name, tmp)
+            shutil.copy2(STEPS_DIR / name, steps_tmp)
 
         # Deterministic stub for segment: a 5x5 grid of square "cells".
-        Path(tmp, "segment.py").write_text(textwrap.dedent("""
+        Path(steps_tmp, "segment.py").write_text(textwrap.dedent("""
             import numpy as np
             METADATA = {"max_workers": 1}
             def run(pd, state, **p):
@@ -203,7 +209,7 @@ def test_pipeline_mock_smoke_end_to_end(temp_yaml, wait_for_completion):
 
         yaml = temp_yaml(f"""
             metadata:
-              functions_dir: "{Path(tmp).as_posix()}"
+              functions_dir: "{steps_tmp.as_posix()}"
               verbose: 0
             cell_analysis:
               - preprocess:

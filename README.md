@@ -155,7 +155,9 @@ inside the worker environment.
 | `workflows/basic_test/` | Synthetic workflows used for integration, robustness, and adversarial tests. |
 | `workflows/rare_event_selection/` | Cellpose and scikit-image workflow for rare-event selection. |
 | `workflows/cell_analysis/` | Generic preprocess, segment, extract, and select workflow. |
-| `workflows/target_acquisition/` | Per-tile Cellpose segmentation and coordinate conversion for adaptive target acquisition. |
+| `workflows/object_detection/` | Detects and measures all objects in acquired image tiles. |
+| `workflows/target_discovery/` | Selects revisit targets from object tables and tile geometry. |
+| `workflows/target_acquisition/` | Combined target-acquisition workflow: per-tile Cellpose segmentation plus coordinate conversion. |
 | `docs/` | Usage guide and v4 design rationale. |
 | `.github/workflows/` | Cross-platform pytest CI. |
 
@@ -166,6 +168,8 @@ pytest -m "not cellpose and not slow"
 pytest
 pytest -m "not slow"
 pytest engine/
+pytest workflows/object_detection/tests/ -m "not cellpose"
+pytest workflows/target_discovery/tests/
 pytest workflows/target_acquisition/tests/ -m "not cellpose"
 ```
 

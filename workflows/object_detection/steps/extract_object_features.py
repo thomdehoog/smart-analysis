@@ -1,4 +1,4 @@
-"""cell_analysis wrapper for shared per-object feature extraction."""
+"""object_detection wrapper for shared per-object feature extraction."""
 
 from __future__ import annotations
 
@@ -10,6 +10,6 @@ from _features import run  # noqa: E402
 
 
 METADATA = {
-    "description": "Per-object features (shape / intensity / neighbourhood / texture)",
-    "version": "3.0",
+    "description": "Extract object features for object_detection",
+    "version": "1.0",
 }

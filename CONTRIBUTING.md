@@ -25,17 +25,17 @@ conda environments to switch into:
 
 ```bash
 # Tiny envs for engine unit and integration tests
-cd workflows/basic_test/environments
-python setup_env.py        # creates SMART--basic_test--env_a / env_b / env_c
-python clean_env.py        # removes them
+python workflows/basic_test/environments/setup_env.py
+python workflows/basic_test/environments/clean_env.py
 
 # Full env for rare-event-selection workflow tests
-cd workflows/rare_event_selection/environments
-python setup_env.py        # installs torch, cellpose, scikit-image
+python workflows/rare_event_selection/environments/setup_env.py
 
 # Full env for target-acquisition workflow tests and demos
-cd workflows/target_acquisition/environments
-python setup_env.py        # installs torch, cellpose, tifffile, scikit-image
+python workflows/target_acquisition/environments/setup_env.py
+
+# Full env for object-detection workflow tests and demos
+python workflows/object_detection/environments/setup_env.py
 ```
 
 Tests marked `@pytest.mark.conda_env` skip cleanly if the `basic_test`
@@ -120,9 +120,6 @@ Mirror the established workflow layout:
 
 ```text
 workflows/<name>/
-  environments/
-    setup_env.py
-    clean_env.py
   pipelines/
     <name>_pipeline.yaml
   steps/
@@ -132,6 +129,9 @@ workflows/<name>/
     test_<name>.py
   run_pipeline.py
 ```
+
+Add `environments/setup_env.py` and `environments/clean_env.py` when the
+workflow owns a dedicated conda environment.
 
 ## Commits and pull requests
 
