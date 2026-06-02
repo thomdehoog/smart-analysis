@@ -156,9 +156,8 @@ def test_select_features_unknown_mode_raises():
 
 def test_pipeline_mock_smoke_end_to_end(temp_yaml, wait_for_completion):
     """Run preprocess -> stub-segment -> extract_features -> select_features
-    on the real skimage.human_mitosis image. Cellpose is replaced with a
-    deterministic synthetic mask grid so this runs anywhere skimage is
-    available."""
+    on a deterministic TIFF. Cellpose is replaced with a synthetic mask
+    grid so the public smoke path is fully offline."""
     try:
         import skimage  # noqa: F401
     except ImportError as exc:
@@ -168,6 +167,15 @@ def test_pipeline_mock_smoke_end_to_end(temp_yaml, wait_for_completion):
 
     tmp = tempfile.mkdtemp()
     try:
+        import numpy as np
+        import tifffile
+
+        yy, xx = np.indices((180, 180))
+        image = ((yy * 3 + xx * 5) % 256).astype(np.uint8)
+        image[40:140, 40:140] = np.maximum(image[40:140, 40:140], 180)
+        image_path = Path(tmp, "synthetic_smoke.tif")
+        tifffile.imwrite(image_path, image, photometric="minisblack")
+
         for name in ("preprocess.py", "extract_features.py",
                      "select_features.py"):
             shutil.copy2(STEPS_DIR / name, tmp)
@@ -212,7 +220,7 @@ def test_pipeline_mock_smoke_end_to_end(temp_yaml, wait_for_completion):
 
         with Engine() as e:
             e.register("ca", yaml)
-            e.submit("ca", {"data_source": "skimage.human_mitosis"})
+            e.submit("ca", {"data_source": str(image_path)})
             results, status = wait_for_completion(e, "ca", 1, timeout=60)
 
         assert status["failed"] == 0, (
@@ -220,6 +228,8 @@ def test_pipeline_mock_smoke_end_to_end(temp_yaml, wait_for_completion):
             if status["failures"] else f"failed without details: {status}"
         )
         assert len(results) == 1
+        assert results[0]["preprocess"]["shape"] == image.shape
+        assert results[0]["preprocess"]["data_source"] == str(image_path)
         out = results[0]["select_features"]
         assert out["mode"] == "percentile"
         assert out["feature"] == "area"

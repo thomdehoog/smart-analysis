@@ -68,6 +68,10 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         bbox = prop.bbox
         w_px = bbox[3] - bbox[1]
         h_px = bbox[2] - bbox[0]
+        if hasattr(prop, "intensity_mean"):
+            mean_intensity = prop.intensity_mean
+        else:
+            mean_intensity = prop.mean_intensity
 
         offset_px = np.array([col - nx / 2, row - ny / 2])
         offset_um = offset_px * np.array([float(pw), float(ph)])
@@ -82,7 +86,7 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
             "bbox_um": (float(w_px * pw), float(h_px * ph)),
             "area_px": int(prop.area),
             "eccentricity": float(prop.eccentricity),
-            "mean_intensity": float(prop.mean_intensity),
+            "mean_intensity": float(mean_intensity),
             "cell_source_stage_xy_um": (cell_x, cell_y),
         })
 

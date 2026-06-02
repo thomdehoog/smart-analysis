@@ -365,9 +365,9 @@ def test_mock_error_in_pipeline():
 
 def test_real_components_smoke(wait_for_completion):
     """End-to-end smoke test: real preprocess.py + extract_features.py +
-    feedback.py from the workflow's steps directory, on real
-    skimage.human_mitosis. Cellpose is stubbed with deterministic synthetic
-    masks so this runs in any env that has skimage + numpy."""
+    feedback.py from the workflow's steps directory, on a deterministic
+    TIFF. Cellpose is stubbed with synthetic masks so the public smoke
+    path is fully offline."""
     try:
         import skimage  # noqa: F401
     except ImportError as exc:
@@ -376,6 +376,15 @@ def test_real_components_smoke(wait_for_completion):
     real_steps = BASE / "steps"
     tmp = tempfile.mkdtemp()
     try:
+        import numpy as np
+        import tifffile
+
+        yy, xx = np.indices((180, 180))
+        image = ((yy * 3 + xx * 5) % 256).astype(np.uint8)
+        image[40:140, 40:140] = np.maximum(image[40:140, 40:140], 180)
+        image_path = Path(tmp, "synthetic_smoke.tif")
+        tifffile.imwrite(image_path, image, photometric="minisblack")
+
         # Copy the real, production step files we want to actually exercise
         for name in ("preprocess.py", "extract_features.py", "feedback.py"):
             shutil.copy2(real_steps / name, tmp)
@@ -424,7 +433,7 @@ def test_real_components_smoke(wait_for_completion):
 
         with Engine() as e:
             e.register("smoke", str(yaml_path))
-            e.submit("smoke", {"data_source": "skimage.human_mitosis"})
+            e.submit("smoke", {"data_source": str(image_path)})
             results, status = wait_for_completion(
                 e, "smoke", 1, timeout=60,
             )
@@ -437,12 +446,12 @@ def test_real_components_smoke(wait_for_completion):
 
         r = results[0]
 
-        # Real preprocess.py loaded a real skimage image
+        # Real preprocess.py loaded the submitted image path.
         shape = r["preprocess"]["shape"]
         assert shape[0] >= 100 and shape[1] >= 100, (
             f"preprocess image suspiciously small: {shape}"
         )
-        assert r["preprocess"]["data_source"] == "skimage.human_mitosis", (
+        assert r["preprocess"]["data_source"] == str(image_path), (
             "preprocess did not record data source"
         )
 

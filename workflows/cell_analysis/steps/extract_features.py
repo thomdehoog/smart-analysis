@@ -199,7 +199,11 @@ def _add_synthetic_properties(
 
     medians = []
     for region in regionprops(masks, intensity_image=img):
-        values = region.intensity_image[region.image]
+        if hasattr(region, "image_intensity"):
+            intensity_image = region.image_intensity
+        else:
+            intensity_image = region.intensity_image
+        values = intensity_image[region.image]
         medians.append(float(np.median(values)) if values.size else np.nan)
     props["intensity_median"] = np.asarray(medians, dtype=float)
 

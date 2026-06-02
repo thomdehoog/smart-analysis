@@ -27,18 +27,25 @@ and the project follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - `README.md` rewritten as a public project onramp for v4.
+- Public setup documentation is now conda-first, matching microscope and
+  per-step environment-switching deployments.
 - `target_acquisition.segment_tile` now declares the reproducible
   `SMART--target_acquisition--main` environment instead of a local
   maintainer environment.
 - `pyproject.toml` test extras now install the non-Cellpose workflow test
-  dependencies (`numpy`, `scikit-image>=0.23`, `tifffile`, `imagecodecs`)
-  so the advertised `pip install -e .[test] && pytest` path works on a
-  clean clone.
+  dependencies (`numpy`, `scikit-image>=0.23`, `pooch`, `tifffile`,
+  `imagecodecs`) so the advertised conda quickstart works on a clean
+  clone.
 - Cellpose test availability is now probed in a subprocess, so broken
   Torch native-library loads cannot pollute or crash the pytest process.
 - `cell_analysis.extract_features` now computes `intensity_median`
   itself instead of depending on a non-portable scikit-image
   `regionprops_table` property.
+- Non-Cellpose workflow smoke tests now use deterministic local TIFFs
+  instead of `skimage.data` sample downloads, so the public fast test
+  command is offline after installation.
+- Workflow steps now use the current scikit-image 0.26 regionprops
+  intensity attribute names with compatibility fallbacks.
 - Scoped failure aggregation now prunes consumed failures from pipeline
   status while preserving unrelated scope failures.
 - Test files now follow the standard pytest idiom. Marker selectors such
