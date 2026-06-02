@@ -2,9 +2,9 @@
 
 Covers the full preprocess -> segment -> extract_features -> feedback chain
 through the v4 Engine API. Mock variants run anywhere skimage is available.
-Real-cellpose variants need a working cellpose+torch in the active env
-(e.g. dino3_test or SMART--rare_event_selection--main); they are auto-skipped
-otherwise via the cellpose marker.
+Real-cellpose variants need a working Cellpose and Torch runtime in the
+active environment; they are auto-skipped otherwise via the cellpose
+marker.
 
 Run with::
 

@@ -48,7 +48,7 @@ doing.
   malicious step cannot crash the engine; it can only fail its own job.
 - Step files are **trusted Python**. The engine assumes the project
   controls them. There is no sandboxing.
-- Step content is **ASCII-only** by project policy — see `README.md`.
+- Step content is **ASCII-only** by project policy — see `CONTRIBUTING.md`.
   Don't add UTF-8 encoding handling to engine `open()` calls.
 
 ## File map
@@ -92,10 +92,9 @@ pytest engine/                # only engine unit tests
 ```
 
 Tests marked `cellpose` auto-skip when cellpose / torch fail to load (see
-`conftest.py::pytest_collection_modifyitems`). Run from a cellpose-capable
-env (e.g. `dino3_test` on the maintainer's machine, or the dedicated
-`SMART--rare_event_selection--main` env created by
-`workflows/rare_event_selection/environments/setup_env.py`) to actually
+`conftest.py::pytest_collection_modifyitems`). Run from any
+cellpose-capable environment, or from a workflow environment created by
+one of the `workflows/*/environments/setup_env.py` scripts, to actually
 exercise them.
 
 ## Design philosophy (what to preserve when refactoring)
