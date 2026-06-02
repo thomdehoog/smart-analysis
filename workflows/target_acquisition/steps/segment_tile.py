@@ -29,7 +29,7 @@ import tifffile
 
 METADATA = {
     "max_workers": 1,
-    "environment": "dino3_test",
+    "environment": "SMART--target_acquisition--main",
 }
 
 
