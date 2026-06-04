@@ -19,6 +19,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Multichannel `object_analysis` support for 2D images with channels:
   Cellpose can segment up to three selected channels, and classical
   intensity/texture outputs include row-aligned `_cN` per-channel columns.
+- Fixed-size deep-feature crops with explicit `mask` and
+  `drop_incomplete_crops` options in the `object_analysis` deep workflow.
 - Shared workflow contract, geometry, segmentation, and feature modules
   under `workflows/`.
 - Conda setup and cleanup scripts for the

@@ -131,6 +131,10 @@ def validate_tile_detection(tile: Mapping[str, Any]) -> dict:
                 raise ValueError(
                     "objects.embeddings.label must be a list aligned to n_objects."
                 )
+            if labels != props["label"]:
+                raise ValueError(
+                    "objects.embeddings.label must match objects.properties.label."
+                )
         if "vectors" in embeddings:
             vectors = embeddings["vectors"]
             if not isinstance(vectors, list) or len(vectors) != n_objects:

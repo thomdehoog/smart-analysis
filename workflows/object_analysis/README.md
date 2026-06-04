@@ -51,6 +51,23 @@ When `output_dir` is provided on the deep path, `extract_deep_features`
 writes tile masks and per-object crop artifacts under `tiles/` and
 `objects/`. Classical-only runs do not cut crops by default.
 
+Deep crops are configured in `pipelines/object_analysis_deep.yaml`:
+
+```yaml
+- extract_deep_features:
+    crop_size_px: 128
+    mask: false
+    drop_incomplete_crops: true
+```
+
+`crop_size_px` is the fixed square extraction size used for every object
+in the run. `mask: false` keeps local context in the crop; `mask: true`
+zeros non-object pixels while still writing the object mask.
+`drop_incomplete_crops: true` excludes objects whose full fixed crop would
+cross the tile boundary. The DINO path does not perform adaptive intensity
+normalization; integer crops are converted by dtype range, and float crops
+must already be in `[0, 1]` from upstream preprocessing.
+
 ## Output
 
 The stable public result is stored under

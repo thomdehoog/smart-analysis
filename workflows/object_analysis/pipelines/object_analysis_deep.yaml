@@ -18,8 +18,8 @@ object_analysis:
       model_name: "dinov2_vitb14"
       input_size_px: 518
       batch_size: 8
-      context_multiplier: 1.5
-      min_crop_size_px: 64
-      crop_mode: "neighborhood"
+      crop_size_px: 128
+      mask: false
+      drop_incomplete_crops: true
 
   - build_object_table:

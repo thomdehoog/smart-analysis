@@ -36,6 +36,7 @@ OPTIONAL_CROP_COLUMNS = (
     "crop_origin_col_px",
     "crop_height_px",
     "crop_width_px",
+    "crop_complete",
     "crop_path",
     "mask_path",
 )
@@ -44,9 +45,14 @@ OPTIONAL_CROP_COLUMNS = (
 def run(pipeline_data: dict, state: dict, **params) -> dict:
     feature_output = pipeline_data["extract_features"]
     props = feature_output["properties"]
-    n_objects = int(feature_output["n_cells"])
 
     public_props = _map_feature_columns(props)
+    if "extract_deep_features" in pipeline_data:
+        public_props = _filter_properties_by_labels(
+            public_props,
+            pipeline_data["extract_deep_features"]["embeddings"].get("label", []),
+        )
+    n_objects = len(public_props.get("label", []))
     geometry = _geometry_from_input(
         pipeline_data["input"],
         pipeline_data.get("detect_objects", {}),
@@ -91,6 +97,19 @@ def _map_feature_columns(props: dict) -> dict:
         if name not in mapped_sources and name not in public_props:
             public_props[name] = to_builtin(values)
     return public_props
+
+
+def _filter_properties_by_labels(props: dict, keep_labels: list) -> dict:
+    keep = {int(label) for label in keep_labels}
+    indices = [
+        index
+        for index, label in enumerate(props.get("label", []))
+        if int(label) in keep
+    ]
+    return {
+        name: [values[index] for index in indices]
+        for name, values in props.items()
+    }
 
 
 def _add_stage_columns(props: dict, geometry: dict) -> None:

@@ -37,7 +37,7 @@ python examples/04_adaptive_microscopy/run.py
 Example 03 requires the conda env `SMART--basic_test--env_a`. If it is
 not present the example prints a skip message and exits cleanly.
 
-Example 05 is a notebook. It uses `skimage.data.human_mitosis()` and runs the
+Example 05 is a notebook. It uses `skimage.data.immunohistochemistry()` and runs the
 dedicated object-analysis and target-discovery conda environments:
 `SMART--object_analysis--vision`, `SMART--object_analysis--classical`,
 `SMART--target_discovery--main`, and `SMART--target_discovery--cluster`.

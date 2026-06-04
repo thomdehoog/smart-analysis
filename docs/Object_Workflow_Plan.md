@@ -157,12 +157,20 @@ Initial implementation target:
 Crop policy for the first deep-feature pass:
 
 - square crop centered on object centroid
-- crop size based on the max bbox dimension times a context multiplier
-- minimum crop size to avoid tiny unstable inputs
+- fixed `crop_size_px`, declared once in the workflow YAML
+- keep crop size out of per-tile input so it cannot drift during a run
 - zero-pad at image boundaries
-- support two modes:
-  - `neighborhood`: keep context pixels around the object
-  - `single_cell`: mask non-object pixels to zero
+- drop objects whose full fixed crop would require padding
+- support `mask: false` / `mask: true`:
+  - `false`: keep context pixels around the object
+  - `true`: zero non-object pixels while still writing the object mask
+- do not perform adaptive intensity normalization in the DINO step;
+  integer crops are converted by dtype range, and any real intensity
+  normalization belongs in upstream preprocessing
+- map fewer-than-three channels deterministically:
+  - 1 channel: `[c0, c0, c0]`
+  - 2 channels: `[c0, c1, (c0 + c1) / 2]`
+  - 3 channels: `[c0, c1, c2]`
 - do not add rotation/scale-invariance augmentation in the first pass;
   record those as later options if embeddings need them
 

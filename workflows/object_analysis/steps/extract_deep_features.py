@@ -29,11 +29,9 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         ),
         masks=pipeline_data["detect_objects"]["masks"],
         tile_id=inp["tile_id"],
-        context_multiplier=float(
-            _setting(inp, params, "context_multiplier", 1.5)
-        ),
-        min_crop_size_px=int(_setting(inp, params, "min_crop_size_px", 64)),
-        mode=_setting(inp, params, "crop_mode", "neighborhood"),
+        crop_size_px=int(params.get("crop_size_px", 128)),
+        mask=bool(params.get("mask", False)),
+        drop_incomplete=bool(params.get("drop_incomplete_crops", True)),
         output_dir=_setting(inp, params, "output_dir", None),
     )
     objects = list(crop_result["objects"])
@@ -156,7 +154,7 @@ def _crop_batch(objects: list[dict], input_size_px: int, torch):
     tensors = []
     for obj in objects:
         rgb = _as_rgb(np.asarray(obj["crop_image"]))
-        rgb = _percentile_normalize(rgb)
+        rgb = _raw_image_to_float01(rgb)
         tensor = torch.from_numpy(rgb.transpose(2, 0, 1)).float().unsqueeze(0)
         tensor = torch.nn.functional.interpolate(
             tensor,
@@ -194,6 +192,17 @@ def _as_rgb(image: np.ndarray) -> np.ndarray:
         n_channels = image.shape[2]
         if n_channels >= 3:
             return image[:, :, :3]
+        if n_channels == 2:
+            first_two = image[:, :, :2]
+            if np.issubdtype(first_two.dtype, np.integer):
+                mean_fill = (
+                    first_two.astype(np.float32).mean(axis=2, keepdims=True)
+                    .round()
+                    .astype(first_two.dtype)
+                )
+            else:
+                mean_fill = first_two.mean(axis=2, keepdims=True)
+            return np.concatenate([first_two, mean_fill], axis=2)
         if n_channels >= 1:
             pad = np.repeat(image[:, :, -1:], 3 - n_channels, axis=2)
             return np.concatenate([image, pad], axis=2)
@@ -203,13 +212,19 @@ def _as_rgb(image: np.ndarray) -> np.ndarray:
     )
 
 
-def _percentile_normalize(image: np.ndarray) -> np.ndarray:
+def _raw_image_to_float01(image: np.ndarray) -> np.ndarray:
+    if image.dtype == np.bool_:
+        return image.astype(np.float32)
+    if np.issubdtype(image.dtype, np.integer):
+        info = np.iinfo(image.dtype)
+        return (image.astype(np.float32) / float(info.max)).astype(np.float32)
     image = image.astype(np.float32, copy=False)
-    lo, hi = np.percentile(image, [1.0, 99.0])
-    if hi <= lo:
-        return np.zeros_like(image, dtype=np.float32)
-    image = np.clip((image - lo) / (hi - lo), 0.0, 1.0)
-    return image.astype(np.float32, copy=False)
+    if image.size and (float(image.min()) < 0.0 or float(image.max()) > 1.0):
+        raise ValueError(
+            "Float DINO crop images must already be in [0, 1]. "
+            "Apply any intensity normalization in an upstream preprocessing step."
+        )
+    return image
 
 
 def _l2_normalize(vector: np.ndarray) -> np.ndarray:

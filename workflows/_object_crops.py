@@ -16,24 +16,21 @@ def extract_object_crops(
     image,
     masks,
     tile_id,
-    context_multiplier: float = 1.5,
-    min_crop_size_px: int = 64,
-    mode: str = "neighborhood",
+    crop_size_px: int = 128,
+    mask: bool = False,
+    drop_incomplete: bool = True,
     output_dir: str | Path | None = None,
 ) -> dict:
     """Extract square per-object crops from an image and label mask.
 
-    The crop is centered on the object centroid, sized from the larger bbox
-    dimension times ``context_multiplier``, and zero-padded at image borders.
-    ``mode='single_cell'`` masks non-object pixels to zero; ``neighborhood``
-    preserves local context.
+    The crop is centered on the object centroid, has the same fixed size for
+    every object, and is zero-padded at image borders. Set ``mask=True`` to
+    zero non-object pixels while still returning the object mask separately.
+    When ``drop_incomplete=True``, objects whose full fixed crop would require
+    border padding are skipped.
     """
-    if mode not in {"neighborhood", "single_cell"}:
-        raise ValueError("mode must be 'neighborhood' or 'single_cell'.")
-    if context_multiplier <= 0:
-        raise ValueError("context_multiplier must be > 0.")
-    if min_crop_size_px <= 0:
-        raise ValueError("min_crop_size_px must be > 0.")
+    if crop_size_px <= 0:
+        raise ValueError("crop_size_px must be > 0.")
 
     image = np.asarray(image)
     masks = np.asarray(masks)
@@ -51,6 +48,7 @@ def extract_object_crops(
         tile_artifacts = _write_tile_artifacts(tile_dir, masks, t_name)
 
     rows = []
+    skipped_incomplete = []
     labels = [int(label) for label in np.unique(masks) if int(label) != 0]
     for label in labels:
         rows_px, cols_px = np.nonzero(masks == label)
@@ -67,12 +65,13 @@ def extract_object_crops(
             image=image,
             masks=masks,
             label=label,
-            bbox=bbox,
             centroid=centroid,
-            context_multiplier=float(context_multiplier),
-            min_crop_size_px=int(min_crop_size_px),
-            mode=mode,
+            crop_size_px=int(crop_size_px),
+            mask=bool(mask),
         )
+        if drop_incomplete and not crop["complete"]:
+            skipped_incomplete.append(label)
+            continue
         row = {
             "label": label,
             "object_id": object_name(tile_id, label),
@@ -85,6 +84,7 @@ def extract_object_crops(
             "crop_origin_col_px": int(crop["origin_col_px"]),
             "crop_height_px": int(crop["image"].shape[0]),
             "crop_width_px": int(crop["image"].shape[1]),
+            "crop_complete": bool(crop["complete"]),
             "crop_image": crop["image"],
             "crop_mask": crop["mask"],
             "crop_path": None,
@@ -99,10 +99,11 @@ def extract_object_crops(
         "n_objects": len(rows),
         "objects": rows,
         "crop_policy": {
-            "context_multiplier": float(context_multiplier),
-            "min_crop_size_px": int(min_crop_size_px),
-            "mode": mode,
+            "crop_size_px": int(crop_size_px),
+            "mask": bool(mask),
+            "drop_incomplete": bool(drop_incomplete),
         },
+        "skipped_incomplete_labels": skipped_incomplete,
         "tile_artifacts": tile_artifacts,
     }
 
@@ -112,16 +113,11 @@ def _crop_one(
     image,
     masks,
     label: int,
-    bbox,
     centroid,
-    context_multiplier: float,
-    min_crop_size_px: int,
-    mode: str,
+    crop_size_px: int,
+    mask: bool,
 ) -> dict:
-    min_row, min_col, max_row, max_col = [int(value) for value in bbox]
-    bbox_h = max(1, max_row - min_row)
-    bbox_w = max(1, max_col - min_col)
-    size = max(min_crop_size_px, int(np.ceil(max(bbox_h, bbox_w) * context_multiplier)))
+    size = int(crop_size_px)
     row_c, col_c = [float(value) for value in centroid]
     row0 = int(np.floor(row_c - size / 2.0))
     col0 = int(np.floor(col_c - size / 2.0))
@@ -129,6 +125,7 @@ def _crop_one(
     col1 = col0 + size
 
     ny, nx = masks.shape
+    complete = row0 >= 0 and col0 >= 0 and row1 <= ny and col1 <= nx
     src_r0 = max(0, row0)
     src_c0 = max(0, col0)
     src_r1 = min(ny, row1)
@@ -148,7 +145,7 @@ def _crop_one(
             masks[src_r0:src_r1, src_c0:src_c1] == label
         )
 
-    if mode == "single_cell":
+    if mask:
         if crop_image.ndim == 2:
             crop_image = np.where(crop_mask, crop_image, 0)
         else:
@@ -157,6 +154,7 @@ def _crop_one(
     return {
         "image": crop_image,
         "mask": crop_mask,
+        "complete": complete,
         "origin_row_px": row0,
         "origin_col_px": col0,
     }

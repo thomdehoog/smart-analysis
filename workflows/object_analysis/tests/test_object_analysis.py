@@ -51,16 +51,6 @@ def _write_synthetic_tile(tmp_path):
     return path
 
 
-def _write_human_mitosis_tile(tmp_path):
-    import tifffile
-    from skimage.data import human_mitosis
-
-    image = human_mitosis()
-    path = tmp_path / "human_mitosis.ome.tiff"
-    tifffile.imwrite(path, image, photometric="minisblack")
-    return path, image
-
-
 def _write_immunohistochemistry_tile(tmp_path):
     import tifffile
     from skimage.data import immunohistochemistry
@@ -159,7 +149,7 @@ def test_deep_path_writes_position_based_crop_artifacts(tmp_path):
     state = {"model": _StubCellposeModel()}
     pipeline_data = detect_objects.run(pipeline_data, state)
     pipeline_data = extract_classical_features.run(pipeline_data, {})
-    pipeline_data = extract_deep_features.run(pipeline_data, {})
+    pipeline_data = extract_deep_features.run(pipeline_data, {}, crop_size_px=10)
     result = build_object_table.run(pipeline_data, {})
     props = result["object_analysis"]["objects"]["properties"]
 
@@ -172,10 +162,10 @@ def test_deep_path_writes_position_based_crop_artifacts(tmp_path):
     assert props["mask_path"][0] == str(object_dir / "mask.tif")
 
 
-def test_single_cell_crop_masks_context_pixels(tmp_path):
+def test_fixed_crop_size_is_used_for_every_object(tmp_path):
     image_path = _write_synthetic_tile(tmp_path)
     pipeline_data = {
-        "input": _payload(image_path, crop_mode="single_cell"),
+        "input": _payload(image_path),
         "metadata": {"verbose": 0},
     }
     pipeline_data = detect_objects.run(pipeline_data, {"model": _StubCellposeModel()})
@@ -183,7 +173,34 @@ def test_single_cell_crop_masks_context_pixels(tmp_path):
         image=pipeline_data["detect_objects"]["image_2d"],
         masks=pipeline_data["detect_objects"]["masks"],
         tile_id=pipeline_data["input"]["tile_id"],
-        mode="single_cell",
+        crop_size_px=24,
+        mask=False,
+    )
+
+    assert crops["crop_policy"] == {
+        "crop_size_px": 24,
+        "mask": False,
+        "drop_incomplete": True,
+    }
+    assert crops["skipped_incomplete_labels"] == [1]
+    assert [obj["label"] for obj in crops["objects"]] == [2]
+    assert [obj["crop_height_px"] for obj in crops["objects"]] == [24]
+    assert [obj["crop_width_px"] for obj in crops["objects"]] == [24]
+
+
+def test_masked_crop_zeroes_context_pixels(tmp_path):
+    image_path = _write_synthetic_tile(tmp_path)
+    pipeline_data = {
+        "input": _payload(image_path),
+        "metadata": {"verbose": 0},
+    }
+    pipeline_data = detect_objects.run(pipeline_data, {"model": _StubCellposeModel()})
+    crops = extract_object_crops(
+        image=pipeline_data["detect_objects"]["image_2d"],
+        masks=pipeline_data["detect_objects"]["masks"],
+        tile_id=pipeline_data["input"]["tile_id"],
+        crop_size_px=10,
+        mask=True,
     )
     obj = crops["objects"][0]
 
@@ -191,6 +208,41 @@ def test_single_cell_crop_masks_context_pixels(tmp_path):
     mask = obj["crop_mask"].astype(bool)
     assert crop[mask].max() > 0
     assert np.all(crop[~mask] == 0)
+
+
+def test_deep_crop_geometry_comes_from_step_params(tmp_path):
+    image_path = _write_synthetic_tile(tmp_path)
+    pipeline_data = {
+        "input": _payload(
+            image_path,
+            backend="mock",
+            embedding_dim=6,
+            crop_size_px=9,
+            mask=True,
+        ),
+        "metadata": {"verbose": 0},
+    }
+    state = {"model": _StubCellposeModel()}
+    pipeline_data = detect_objects.run(pipeline_data, state)
+    pipeline_data = extract_classical_features.run(pipeline_data, {})
+    pipeline_data = extract_deep_features.run(
+        pipeline_data,
+        {},
+        crop_size_px=28,
+        mask=False,
+    )
+    result = build_object_table.run(pipeline_data, {})["object_analysis"]
+    props = result["objects"]["properties"]
+
+    assert props["label"] == [2]
+    assert props["crop_height_px"] == [28]
+    assert props["crop_width_px"] == [28]
+    assert props["crop_complete"] == [True]
+    assert result["objects"]["embeddings"]["crop_policy"] == {
+        "crop_size_px": 28,
+        "mask": False,
+        "drop_incomplete": True,
+    }
 
 
 def test_mock_deep_features_merge_into_object_table(tmp_path):
@@ -202,7 +254,7 @@ def test_mock_deep_features_merge_into_object_table(tmp_path):
     state = {"model": _StubCellposeModel()}
     pipeline_data = detect_objects.run(pipeline_data, state)
     pipeline_data = extract_classical_features.run(pipeline_data, {})
-    pipeline_data = extract_deep_features.run(pipeline_data, {})
+    pipeline_data = extract_deep_features.run(pipeline_data, {}, crop_size_px=10)
     result = build_object_table.run(pipeline_data, {})["object_analysis"]
 
     embeddings = result["objects"]["embeddings"]
@@ -223,8 +275,8 @@ def test_embedding_row_alignment_is_validated(tmp_path):
     pipeline_data = extract_classical_features.run(pipeline_data, {})
     pipeline_data["extract_deep_features"] = {
         "embeddings": {
-            "label": [1],
-            "vectors": [[1.0, 0.0]],
+            "label": [2, 1],
+            "vectors": [[1.0, 0.0], [0.0, 1.0]],
             "model": "bad",
             "backend": "mock",
         }
@@ -252,7 +304,45 @@ def test_dino_rgb_conversion_handles_fewer_than_three_channels():
     assert np.all(one_rgb[..., 2] == 13)
     assert np.all(two_rgb[..., 0] == 17)
     assert np.all(two_rgb[..., 1] == 19)
-    assert np.all(two_rgb[..., 2] == 19)
+    assert np.all(two_rgb[..., 2] == 18)
+
+
+def test_dino_two_channel_uint16_rgb_chain_scales_by_dtype():
+    image = np.zeros((6, 7, 2), dtype=np.uint16)
+    image[..., 0] = 12000
+    image[..., 1] = 24000
+
+    rgb = extract_deep_features._as_rgb(image)
+    scaled = extract_deep_features._raw_image_to_float01(rgb)
+
+    assert rgb.dtype == np.uint16
+    assert scaled.shape == (6, 7, 3)
+    assert scaled[..., 0].mean() == pytest.approx(12000 / 65535)
+    assert scaled[..., 1].mean() == pytest.approx(24000 / 65535)
+    assert scaled[..., 2].mean() == pytest.approx(18000 / 65535)
+
+
+def test_dino_raw_integer_conversion_preserves_relative_brightness():
+    image = np.asarray(
+        [
+            [[0, 25, 50], [50, 75, 100]],
+            [[100, 125, 150], [150, 175, 200]],
+        ],
+        dtype=np.uint8,
+    )
+
+    scaled = extract_deep_features._raw_image_to_float01(image)
+
+    assert scaled[0, 0, 0] == pytest.approx(0.0)
+    assert scaled[0, 1, 0] == pytest.approx(50 / 255)
+    assert scaled[1, 1, 2] == pytest.approx(200 / 255)
+
+
+def test_dino_float_crops_must_be_preprocessed_to_unit_range():
+    image = np.full((4, 5, 3), 2.0, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="preprocessing"):
+        extract_deep_features._raw_image_to_float01(image)
 
 
 def test_dino_rgb_conversion_rejects_non_crop_shapes():
@@ -298,26 +388,29 @@ def test_object_analysis_hands_off_to_target_discovery(tmp_path):
 
 
 @pytest.mark.cellpose
+@pytest.mark.pooch
 @pytest.mark.slow
 def test_real_cellpose_object_analysis_end_to_end(tmp_path):
-    image_path, image = _write_human_mitosis_tile(tmp_path)
+    image_path, image = _write_immunohistochemistry_tile(tmp_path)
 
     result = _run_engine_workflow(
         "object_analysis_real_cellpose",
         CLASSICAL_YAML,
         _payload(
             image_path,
-            tile_id=["R0", 0, 0],
+            tile_id=["IHC", 0, 0],
             tile_stage_xy_um=[10000.0, 15000.0],
-            source_pixel_size_um=[0.65, 0.65],
+            source_pixel_size_um=[0.5, 0.5],
             source_image_size_px=[int(image.shape[1]), int(image.shape[0])],
             image_to_stage=[[0.0, -1.0], [1.0, 0.0]],
+            channels=None,
+            gpu=True,
         ),
     )
     tile = validate_tile_detection(result["object_analysis"])
 
     assert tile["objects"]["n_objects"] > 0
-    assert tile["objects"]["properties"]["object_id"][0].startswith("R0_r000_c000_obj")
+    assert tile["objects"]["properties"]["object_id"][0].startswith("IHC_r000_c000_obj")
     assert all(
         isinstance(value, float)
         for value in tile["objects"]["properties"]["stage_x_um"]
@@ -358,9 +451,10 @@ def test_real_cpsam_multichannel_immunohistochemistry_end_to_end(tmp_path):
 
 @pytest.mark.cellpose
 @pytest.mark.deep
+@pytest.mark.pooch
 @pytest.mark.slow
 def test_real_dinov2_embedding_end_to_end(tmp_path):
-    image_path, image = _write_human_mitosis_tile(tmp_path)
+    image_path, image = _write_immunohistochemistry_tile(tmp_path)
 
     result = _run_engine_workflow(
         "object_analysis_real_deep",
