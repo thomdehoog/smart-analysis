@@ -66,6 +66,8 @@ def setup_workflow_env(
     pip_packages: list[str],
     diagnostics: list[tuple[str, str]],
     python_version: str = "3.12",
+    install_torch: bool = True,
+    default_step: str = "main",
 ) -> None:
     """Create a SMART--<workflow>--<step> conda env."""
     parser = argparse.ArgumentParser(
@@ -73,8 +75,8 @@ def setup_workflow_env(
     )
     parser.add_argument(
         "--step",
-        default="main",
-        help="Step name for isolation (default: main)",
+        default=default_step,
+        help=f"Step name for isolation (default: {default_step})",
     )
     parser.add_argument(
         "--python",
@@ -84,7 +86,7 @@ def setup_workflow_env(
     parser.add_argument(
         "--gpu",
         default=None,
-        help="GPU backend: cu128, cu124, cu121, mps, cpu (default: auto-detect)",
+        help="PyTorch GPU backend: cu128, cu124, cu121, mps, cpu (default: auto-detect)",
     )
     parser.add_argument(
         "--dry-run",
@@ -94,7 +96,7 @@ def setup_workflow_env(
     args = parser.parse_args()
 
     env_name = f"SMART--{workflow}--{args.step}"
-    gpu = args.gpu or detect_gpu()
+    gpu = (args.gpu or detect_gpu()) if install_torch else None
     t_start = time.time()
 
     banner("SMART Analysis -- Environment Setup")
@@ -104,7 +106,7 @@ def setup_workflow_env(
 
     info("Platform", f"{pf.system()} ({pf.machine()})")
     info("Python target", args.python)
-    info("GPU backend", gpu_label(gpu))
+    info("GPU backend", gpu_label(gpu) if install_torch else "not used")
 
     try:
         conda_info = get_conda_info()
@@ -134,7 +136,7 @@ def setup_workflow_env(
     info("Workflow", workflow)
     info("Step", args.step)
 
-    total_steps = 4
+    total_steps = 4 if install_torch else 3
 
     section(f"[1/{total_steps}] Creating conda environment")
     create_cmd = [
@@ -157,27 +159,31 @@ def setup_workflow_env(
             sys.exit(1)
         ok(f"Created {env_name}")
 
-    section(f"[2/{total_steps}] Installing PyTorch ({gpu_label(gpu)})")
-    pip_cmd = [
-        conda,
-        "run",
-        "--no-capture-output",
-        "-n",
-        env_name,
-        "pip",
-        "install",
-    ] + get_torch_install_args(gpu)
-    cmd_line(pip_cmd)
-    if args.dry_run:
-        skip("dry run")
-    else:
-        result = subprocess.run(pip_cmd)
-        if result.returncode != 0:
-            fail("PyTorch installation failed")
-            sys.exit(1)
-        ok("PyTorch installed")
+    next_step = 2
+    if install_torch:
+        section(f"[{next_step}/{total_steps}] Installing PyTorch ({gpu_label(gpu)})")
+        pip_cmd = [
+            conda,
+            "run",
+            "--no-capture-output",
+            "-n",
+            env_name,
+            "pip",
+            "install",
+        ] + get_torch_install_args(gpu)
+        cmd_line(pip_cmd)
+        if args.dry_run:
+            skip("dry run")
+        else:
+            result = subprocess.run(pip_cmd)
+            if result.returncode != 0:
+                fail("PyTorch installation failed")
+                sys.exit(1)
+            ok("PyTorch installed")
+            _run_torch_backend_check(conda, env_name, gpu)
+        next_step += 1
 
-    section(f"[3/{total_steps}] Installing analysis packages")
+    section(f"[{next_step}/{total_steps}] Installing analysis packages")
     pip_cmd = [
         conda,
         "run",
@@ -199,7 +205,8 @@ def setup_workflow_env(
         for pkg in pip_packages:
             ok(pkg)
 
-    section(f"[4/{total_steps}] Running diagnostics")
+    next_step += 1
+    section(f"[{next_step}/{total_steps}] Running diagnostics")
     if args.dry_run:
         skip("dry run")
     else:
@@ -210,9 +217,10 @@ def setup_workflow_env(
     banner("Setup Complete")
     section("Summary")
     info("Environment", env_name)
-    info("GPU backend", gpu_label(gpu))
+    info("GPU backend", gpu_label(gpu) if install_torch else "not used")
     info("Python", args.python)
-    info("Packages", str(len(pip_packages) + 2))
+    torch_packages = 2 if install_torch else 0
+    info("Packages", str(len(pip_packages) + torch_packages))
     info("Time", f"{elapsed:.0f}s")
 
     section("Next steps")
@@ -358,3 +366,51 @@ def _run_diagnostics(
         banner("Setup Failed")
         print("  Some diagnostics did not pass.")
         sys.exit(1)
+
+
+def _run_torch_backend_check(conda: str, env_name: str, gpu: str) -> None:
+    if gpu == "cpu":
+        code = (
+            "import torch; "
+            "x = torch.ones((2, 2)); "
+            "print(f'{torch.__version__} CPU tensor OK shape={tuple(x.shape)}')"
+        )
+    elif gpu == "mps":
+        code = (
+            "import torch; "
+            "assert torch.backends.mps.is_available(), 'MPS is not available'; "
+            "x = torch.ones((2, 2), device='mps'); "
+            "print(f'{torch.__version__} MPS tensor OK device={x.device}')"
+        )
+    else:
+        code = (
+            "import torch; "
+            "assert torch.cuda.is_available(), 'CUDA is not available'; "
+            "x = torch.ones((2, 2), device='cuda'); "
+            "torch.cuda.synchronize(); "
+            "print(f'{torch.__version__} CUDA tensor OK device={x.device} "
+            "name={torch.cuda.get_device_name(0)}')"
+        )
+
+    result = subprocess.run(
+        [
+            conda,
+            "run",
+            "--no-capture-output",
+            "-n",
+            env_name,
+            "python",
+            "-c",
+            code,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout.strip()
+    if result.returncode == 0:
+        ok(f"{'PyTorch backend check':<28s} {output}")
+        return
+    fail(f"{'PyTorch backend check':<28s}")
+    if result.stderr.strip():
+        print(result.stderr.strip())
+    sys.exit(1)

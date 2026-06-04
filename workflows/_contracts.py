@@ -25,6 +25,8 @@ REQUIRED_OBJECT_COLUMNS = (
     "area",
     "intensity_mean",
     "eccentricity",
+    "stage_x_um",
+    "stage_y_um",
 )
 
 REQUIRED_GEOMETRY_FIELDS = (
@@ -118,6 +120,28 @@ def validate_tile_detection(tile: Mapping[str, Any]) -> dict:
     for row in matrix:
         if not isinstance(row, list) or len(row) != 2:
             raise ValueError("geometry.image_to_stage must be a 2x2 list.")
+
+    embeddings = objects.get("embeddings")
+    if embeddings is not None:
+        if not isinstance(embeddings, dict):
+            raise ValueError("objects.embeddings must be a dict when present.")
+        if "label" in embeddings:
+            labels = embeddings["label"]
+            if not isinstance(labels, list) or len(labels) != n_objects:
+                raise ValueError(
+                    "objects.embeddings.label must be a list aligned to n_objects."
+                )
+        if "vectors" in embeddings:
+            vectors = embeddings["vectors"]
+            if not isinstance(vectors, list) or len(vectors) != n_objects:
+                raise ValueError(
+                    "objects.embeddings.vectors must be a list aligned to n_objects."
+                )
+            for idx, vector in enumerate(vectors):
+                if not isinstance(vector, list):
+                    raise ValueError(
+                        f"objects.embeddings.vectors[{idx}] must be a list."
+                    )
 
     return tile
 
