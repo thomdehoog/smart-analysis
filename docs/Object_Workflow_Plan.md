@@ -20,40 +20,10 @@ The user-facing result is one object-centered record. Internal step
 names, scikit-image column names, numpy values, masks, crops, and model
 details should not leak into the public contract.
 
-## Current V1
+## Implemented Workflow
 
-The current implemented v1 is:
-
-```text
-detect_objects
-extract_object_features
-package_objects
-```
-
-Behavior:
-
-- `detect_objects` runs Cellpose and produces masks, the analysis image,
-  object count, and image size.
-- `extract_object_features` computes classical scikit-image features.
-- `package_objects` converts internal outputs into the public
-  `object_detection` contract.
-
-The review fixes are already applied:
-
-- `target_discovery` filters `border_margin_px` by object bbox bounds.
-- `extract_object_features` declares the object-detection feature env.
-- Public outputs use workflow-level keys, not duplicate step-level keys.
-
-## Immediate Cleanup
-
-Rename the v1 steps while the workflow is still small:
-
-```text
-extract_object_features -> extract_classical_features
-package_objects         -> build_object_table
-```
-
-The v1 pipeline should become:
+The implemented object-centered workflow is `workflows/object_analysis/`.
+The classical path is:
 
 ```text
 detect_objects
@@ -61,32 +31,38 @@ extract_classical_features
 build_object_table
 ```
 
-This is a naming-only pass. Do not add persistence, crops, DINO, or
-clustering in the same change.
+The deep-feature path adds one optional step:
 
-Update:
+```text
+detect_objects
+extract_classical_features
+extract_deep_features
+build_object_table
+```
 
-- `workflows/object_detection/pipelines/object_detection.yaml`
-- `workflows/object_detection/steps/`
-- `workflows/object_detection/tests/`
-- `workflows/object_detection/README.md`
-- root README / changelog if they mention the old step names
-- `BUILD_SPEC.md` once the naming is final
+Behavior:
+
+- `detect_objects` runs Cellpose and produces masks, the analysis image,
+  object count, and image size.
+- `extract_classical_features` computes scikit-image features.
+- `extract_deep_features` optionally creates crops and computes DINOv2
+  embeddings.
+- `build_object_table` converts internal outputs into the public
+  `object_analysis` contract.
 
 Verification:
 
 ```bash
-pytest workflows/object_detection/tests/ -m "not cellpose"
+pytest workflows/object_analysis/tests/ -m "not cellpose and not deep"
 pytest workflows/target_discovery/tests/
-pytest workflows/cell_analysis/tests/ -m "not cellpose"
-pytest workflows/target_acquisition/tests/ -m "not cellpose"
 pytest -m "not cellpose and not slow"
 ```
 
-Run the Cellpose marker from a Cellpose-capable env before publishing:
+Run the Cellpose and deep markers from capable envs before publishing:
 
 ```bash
 pytest -m cellpose
+pytest workflows/object_analysis/tests/ -m deep
 ```
 
 ## Step Responsibilities
@@ -155,6 +131,7 @@ Responsibilities:
   channel-to-RGB mapping
 - load and reuse the DINO model in step state
 - output row-aligned embeddings
+- write optional tile/object crop artifacts when `output_dir` is provided
 
 Environment:
 
@@ -202,11 +179,13 @@ What is the stable object table that downstream workflows consume?
 Responsibilities:
 
 - rename internal feature columns to public names
+- create stable position-based `tile_name` and `object_id` columns
 - attach geometry and stage coordinates
 - convert numpy values to JSON-native values
 - merge optional embeddings
+- merge optional crop-path columns from the deep-feature path
 - validate row alignment
-- emit the stable `object_detection` record
+- emit the stable `object_analysis` record
 
 Environment:
 
@@ -271,7 +250,7 @@ Tile analysis is position-based. It knows:
 Object analysis is object-based. It knows:
 
 - object identity
-- object crop or mask artifact, when requested
+- object crop or mask artifact, when deep features or QC export requested
 - classical features
 - deep embeddings, when requested
 
@@ -282,7 +261,7 @@ Do not make this part of the rename pass. This is the later scale layer.
 At scale, use a run folder with clean artifacts:
 
 ```text
-object_detection/<run>/
+object_analysis/<run>/
   tiles/
   objects/
   features/
@@ -312,7 +291,7 @@ Rules:
 Suggested layout:
 
 ```text
-object_detection/<run>/
+object_analysis/<run>/
   tiles/
     R0_r003_c007/
       masks.tif
@@ -356,21 +335,29 @@ It should rank and filter from public columns and optional embeddings:
 It should not read masks, rerun segmentation, or recompute classical
 region properties.
 
+The clustering path is:
+
+```text
+cluster_objects
+select_targets
+```
+
+`cluster_objects` clusters object embeddings with a cosine kNN graph,
+Leiden clustering, and UMAP coordinates. It writes `cluster_id`,
+`umap_x`, and `umap_y` back as row-aligned object columns and exports a
+table plus a scatterplot. The table keeps `object_id`, tile/object
+identity, absolute `stage_x_um` / `stage_y_um`, clustering labels, and
+UMAP coordinates; the scatterplot is only a visual view of that table.
+
 ## Later Work
 
-After the v1 rename:
+After the implemented workflow is stable:
 
-1. Add optional embedding validation to `_contracts.py`.
-2. Add `extract_deep_features`.
-3. Add a second pipeline YAML for deep features.
-4. Add mocked deep-feature tests first.
-5. Add one real DINO test marked slow/deep.
-6. Design the scalable `tiles/`, `objects/`, `features/` artifact
+1. Design the scalable `tiles/`, `objects/`, `features/` artifact
    helpers.
-7. Add clustering as a target-discovery strategy.
-8. Add explicit, tested auto-threshold rules.
-9. Migrate consumers to `object_detection` plus `target_discovery`.
-10. Decide whether to deprecate the combined `target_acquisition`
+2. Add explicit, tested auto-threshold rules.
+3. Migrate consumers to `object_analysis` plus `target_discovery`.
+4. Decide whether to deprecate the combined `target_acquisition`
     workflow.
 
 Do not mix these phases. Keep each change small enough that its tests

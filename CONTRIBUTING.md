@@ -34,17 +34,26 @@ python workflows/rare_event_selection/environments/setup_env.py
 # Full env for target-acquisition workflow tests and demos
 python workflows/target_acquisition/environments/setup_env.py
 
-# Full env for object-detection workflow tests and demos
-python workflows/object_detection/environments/setup_env.py
+# Full envs for object-analysis workflow tests and demos
+python workflows/object_analysis/environments/setup_env.py
+python workflows/object_analysis/environments/setup_env.py --step classical
+
+# Target discovery envs
+python workflows/target_discovery/environments/setup_env.py
+python workflows/target_discovery/environments/setup_env.py --step cluster
 ```
 
 Tests marked `@pytest.mark.conda_env` skip cleanly if the `basic_test`
 environments do not exist. Tests marked `@pytest.mark.cellpose` skip when
-Cellpose or Torch cannot be imported.
+Cellpose or Torch cannot be imported. Tests marked `@pytest.mark.deep`
+need a Torch/DINO-capable environment such as
+`SMART--object_analysis--vision`. Tests marked `@pytest.mark.cluster`
+need `SMART--target_discovery--cluster`.
 
 ## Running tests
 
 ```bash
+pytest -m "not cellpose and not deep and not cluster and not conda_env"  # CI-shaped
 pytest -m "not cellpose and not slow"  # fast public smoke test
 pytest                          # everything runnable in this env
 pytest -m "not slow"            # fast subset including Cellpose if available

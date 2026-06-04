@@ -10,16 +10,20 @@ and the project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Public workflow documentation for `workflows/target_acquisition/`.
-- Public `object_detection` workflow for per-tile Cellpose segmentation
-  and object feature packaging.
+- Public `object_analysis` workflow with object crops, classical
+  features, optional DINOv2 embeddings, and a final object table.
 - Public `target_discovery` workflow for selecting revisit targets from
   object tables and tile geometry.
+- Optional `target_discovery` clustering path with cosine kNN, Leiden
+  clustering, UMAP coordinates, CSV/JSON tables, and SVG scatterplots.
 - Shared workflow contract, geometry, segmentation, and feature modules
   under `workflows/`.
 - Conda setup and cleanup scripts for the
   `SMART--target_acquisition--main` workflow environment.
-- Conda setup and cleanup scripts for the
-  `SMART--object_detection--main` workflow environment.
+- Conda setup and cleanup scripts for the `SMART--object_analysis--vision`
+  and `SMART--object_analysis--classical` workflow environments.
+- Conda setup and cleanup scripts for the `SMART--target_discovery--main`
+  and `SMART--target_discovery--cluster` workflow environments.
 - Shared workflow environment setup helper used by the Cellpose workflow
   environment scripts.
 - CLI runner for `workflows/target_acquisition/`.

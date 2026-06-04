@@ -1,542 +1,183 @@
-# Build Spec: Object Detection and Target Discovery Workflows
+# Build Spec: Object Analysis and Target Discovery
 
-This document defines the workflow split for Smart Analysis. It records
-the implementation contract for the object-detection and
-target-discovery path.
+This document records the implemented workflow contract for the current
+object-analysis and target-discovery path.
 
-The goal is a simple, internally consistent foundation:
-
-1. Detect and measure objects.
-2. Aggregate detected-object tiles into an overview.
-3. Discover revisit targets from that overview.
-
-The design is additive. The existing combined `target_acquisition`
-workflow stays in place while the new workflows are built and verified.
-
-## Design Rules
-
-- Keep one obvious path: detect objects, aggregate tiles, discover
-  targets.
-- Public workflow output must not depend on internal step names.
-- Contracts are plain JSON-native dictionaries: dicts, lists, strings,
-  ints, floats, booleans, and nulls.
-- Public contracts must contain no tuples, numpy arrays, or numpy scalar
-  values.
-- Shared workflow code lives in underscore-prefixed modules under
-  `workflows/`.
-- Engine-facing step files remain real step files with literal top-level
-  `METADATA`.
-- Tests live inside each workflow's `tests/` directory.
-- Do not remove or rename `target_acquisition` in this build.
-
-## Workflow Shape
-
-The repository should contain three target-related workflows:
+The intended path is:
 
 ```text
-workflows/object_detection/
+object_analysis -> overview -> target_discovery
+```
+
+`target_acquisition` remains the combined compatibility workflow until
+its consumers are migrated.
+
+## Workflows
+
+```text
+workflows/object_analysis/
 workflows/target_discovery/
 workflows/target_acquisition/
 ```
 
-`object_detection` is the canonical detection phase. It detects and
-measures all objects in acquired image tiles.
+`object_analysis` detects objects in one tile, extracts classical
+features, optionally extracts DINOv2 embeddings, and emits one validated
+tile record.
 
-`target_discovery` is the canonical selection phase. It consumes object
-tables and tile geometry, then emits revisit targets.
+`target_discovery` consumes one aggregated overview of tile records. It
+can either select targets directly, or cluster embeddings first and then
+select targets from the same enriched table.
 
-`target_acquisition` remains the existing combined workflow. Public docs
-may describe it as the combined target-acquisition workflow. Do not call
-it legacy until the replacement path is implemented and consumers have
-migrated.
+## Object Analysis
 
-## Shared Modules
-
-Add these modules at the `workflows/` root:
+Classical path:
 
 ```text
-workflows/_contracts.py
-workflows/_features.py
-workflows/_geometry.py
-workflows/_segmentation.py
+detect_objects -> extract_classical_features -> build_object_table
 ```
 
-### `_contracts.py`
-
-This module owns the inter-workflow contract. Keep it small. It is not a
-schema framework.
-
-Required functions:
-
-```python
-validate_tile_detection(tile)
-validate_overview(overview)
-validate_targets(result)
-to_builtin(obj)
-save_overview(path, overview)
-load_overview(path)
-```
-
-Responsibilities:
-
-- Check required fields.
-- Check row-aligned object property columns.
-- Convert numpy arrays and numpy scalar values to native Python values.
-- Enforce JSON round-trippability.
-- Save and load overviews as JSON.
-
-### `_features.py`
-
-Move the comprehensive feature extraction implementation from
-`workflows/cell_analysis/steps/extract_features.py` into this module as a
-mechanical relocation.
-
-Do not refactor behavior during the move.
-
-After the move, `cell_analysis/steps/extract_features.py` should be a
-thin wrapper over `_features.py`.
-
-`object_detection/steps/extract_object_features.py` should also be a thin
-wrapper over `_features.py`.
-
-### `_segmentation.py`
-
-Extract the reusable TIFF loading, 2D channel handling, and warm Cellpose
-model logic needed by new object detection.
-
-`object_detection/steps/detect_objects.py` should call this shared
-module.
-
-`target_acquisition/steps/segment_tile.py` is compatibility code and
-stays unchanged in the first implementation pass, even if that leaves a
-temporary copy of related logic. This is deliberate: the compatibility
-workflow is frozen while the new path is built. Remove that duplication
-only after the combined workflow is retired or migrated.
-
-### `_geometry.py`
-
-This module owns shared image-to-stage coordinate conversion.
-
-Required function:
-
-```python
-image_point_to_stage_xy(
-    *,
-    centroid_row_px,
-    centroid_col_px,
-    image_size_px,
-    pixel_size_um,
-    tile_stage_xy_um,
-    image_to_stage,
-)
-```
-
-It must use the same math already tested in
-`target_acquisition/steps/pick_targets.py`:
-
-1. Image coordinates are row/col.
-2. Stage-offset coordinates are x/y, so use col for x and row for y.
-3. Offsets are measured from the image center.
-4. Pixel offsets are scaled by pixel size.
-5. The 2x2 `image_to_stage` matrix maps image x/y offsets to stage x/y
-   offsets.
-6. The stage offset is added to `tile_stage_xy_um`.
-
-`target_discovery` must call this helper rather than reimplementing the
-affine conversion locally.
-
-## Step Metadata Rule
-
-The engine reads step `METADATA` by AST literal parsing. It only
-recognizes a top-level literal assignment such as:
-
-```python
-METADATA = {
-    "environment": "SMART--object_detection--main",
-    "max_workers": 1,
-}
-```
-
-Therefore, wrappers must not import `METADATA` from shared modules.
-
-Correct wrapper pattern:
-
-```python
-from pathlib import Path
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _features import run  # noqa: E402
-
-METADATA = {
-    "description": "Extract object features",
-    "version": "1.0",
-}
-```
-
-Each engine-facing step owns its own literal `METADATA`, even when it
-shares the same implementation function.
-
-Use the same import pattern for `_contracts.py`, `_features.py`,
-`_geometry.py`, and `_segmentation.py`. The workflow directories are
-loaded by path and should not rely on `workflows` being an importable
-Python package.
-
-## Coordinate Convention
-
-Object tables use image coordinates:
+Deep-feature path:
 
 ```text
-row, col = y, x
+detect_objects -> extract_classical_features -> extract_deep_features -> build_object_table
 ```
 
-Stage coordinates use microscope coordinates:
+Environment split:
 
 ```text
-x, y in microns
+detect_objects / extract_deep_features -> SMART--object_analysis--vision
+extract_classical_features             -> SMART--object_analysis--classical
+build_object_table                     -> orchestrator env
 ```
 
-The row/col to x/y conversion happens only in target discovery.
+The vision env owns Torch, Cellpose, TIFF IO, and DINOv2. The classical
+env owns scikit-image/SciPy feature extraction. Do not mix these stacks
+unless a tested package set proves it is safe.
 
-Avoid tuple-valued public fields. Use explicit scalar columns and fields.
-
-## Public Contracts
-
-### Tile Detection
-
-One `object_detection` run emits one tile detection:
+The public tile record is stored under `pipeline_data["object_analysis"]`
+and has:
 
 ```python
 {
     "objects": {
         "properties": {
-            "label": [1, 2],
-            "centroid_row_px": [120.5, 340.0],
-            "centroid_col_px": [220.0, 410.5],
-            "bbox_min_row_px": [100, 320],
-            "bbox_min_col_px": [200, 390],
-            "bbox_max_row_px": [145, 365],
-            "bbox_max_col_px": [245, 435],
-            "area": [900.0, 1200.0],
-            "intensity_mean": [132.5, 98.2],
-            "eccentricity": [0.2, 0.6]
+            "label": [...],
+            "object_id": [...],
+            "tile_name": [...],
+            "centroid_row_px": [...],
+            "centroid_col_px": [...],
+            "bbox_min_row_px": [...],
+            "bbox_min_col_px": [...],
+            "bbox_max_row_px": [...],
+            "bbox_max_col_px": [...],
+            "stage_x_um": [...],
+            "stage_y_um": [...],
+            "area": [...],
+            "intensity_mean": [...],
+            "eccentricity": [...]
         },
-        "n_objects": 2
+        "embeddings": {...},  # optional
+        "n_objects": n,
     },
-    "geometry": {
-        "tile_id": ["R0", 3, 7],
-        "tile_stage_xy_um": [10000.0, 15000.0],
-        "tile_zwide_um": 2500.0,
-        "source_pixel_size_um": [0.65, 0.65],
-        "source_image_size_px": [2048, 2048],
-        "image_to_stage": [[0.0, -1.0], [1.0, 0.0]]
-    }
+    "geometry": {...},
 }
 ```
 
-Required object columns:
+All columns are row-aligned. Pixel coordinates are row/col. Stage
+coordinates are absolute x/y microns derived from the tile geometry
+provided in the object-analysis input.
 
-- `label`
-- `centroid_row_px`
-- `centroid_col_px`
-- `bbox_min_row_px`
-- `bbox_min_col_px`
-- `bbox_max_row_px`
-- `bbox_max_col_px`
-- `area`
-- `intensity_mean`
-- `eccentricity`
+## Target Discovery
 
-All other feature columns are allowed as row-aligned pass-through data.
-The contract should not enumerate every possible feature column.
-
-`n_objects` must equal the length of every property column. Empty
-detections are valid and must use empty lists with `n_objects == 0`.
-
-### Overview
-
-The orchestrator aggregates tile detections into an overview:
-
-```python
-{
-    "tiles": [
-        tile_detection,
-        tile_detection
-    ]
-}
-```
-
-Aggregation is not a workflow step. `object_detection` emits one tile.
-The caller assembles the list of tiles. `target_discovery` consumes the
-assembled overview.
-
-### Targets
-
-`target_discovery` emits:
-
-```python
-{
-    "targets": [
-        {
-            "target_id": ["R0", 3, 7, 1],
-            "tile_id": ["R0", 3, 7],
-            "object_label": 1,
-            "score": 900.0,
-            "source_feature": "area",
-            "centroid_row_px": 120.5,
-            "centroid_col_px": 220.0,
-            "bbox_min_row_px": 100,
-            "bbox_min_col_px": 200,
-            "bbox_max_row_px": 145,
-            "bbox_max_col_px": 245,
-            "stage_x_um": 9994.8,
-            "stage_y_um": 14976.7
-        }
-    ]
-}
-```
-
-Target fields are scalar and JSON-native. Do not use tuple fields such as
-`centroid_col_row_px`, `bbox_px`, or `cell_source_stage_xy_um` in the new
-public contract.
-
-## Build Order
-
-### Phase 1: Build Spec
-
-Add this document and keep it generic. It should describe Smart Analysis
-workflow structure only.
-
-### Phase 2: Contracts
-
-Implement `workflows/_contracts.py`.
-
-Add tests in:
+Simple selection:
 
 ```text
-workflows/target_discovery/tests/test_contracts.py
+select_targets
 ```
 
-Test:
-
-- required detection fields
-- required overview fields
-- required target fields
-- row-aligned object properties
-- sparse labels
-- empty detections
-- native Python type conversion
-- JSON save/load round-trip
-- row/col coordinate convention
-
-The synthetic fixtures in these tests must pass the same validators that
-real workflow outputs will use.
-
-### Phase 3: Feature Extraction Sharing
-
-Move the feature implementation to `workflows/_features.py`.
-
-Update:
+Clustering plus selection:
 
 ```text
-workflows/cell_analysis/steps/extract_features.py
+cluster_objects -> select_targets
 ```
 
-to be a wrapper with literal `METADATA`.
-
-Run:
-
-```bash
-pytest workflows/cell_analysis/tests/ -m "not cellpose"
-```
-
-Do not continue if this changes behavior.
-
-### Phase 4: Target Discovery
-
-Add:
+Environment split:
 
 ```text
-workflows/target_discovery/
-  README.md
-  pipelines/target_discovery.yaml
-  steps/discover_targets.py
-  tests/test_target_discovery.py
-  tests/test_handoff.py
-  run_pipeline.py
+select_targets   -> SMART--target_discovery--main
+cluster_objects  -> SMART--target_discovery--cluster
 ```
 
-`tests/test_contracts.py` is introduced in Phase 2 and remains in this
-workflow's `tests/` directory.
+`cluster_objects` reads row-aligned embedding vectors from the object
+table, builds a cosine kNN graph, runs Leiden clustering, computes UMAP
+coordinates, and writes clustering artifacts.
 
-V1 behavior:
-
-- Consume `pipeline_data["input"]["tiles"]`.
-- Validate the overview before selection.
-- Filter by explicit thresholds when provided.
-- Rank by one feature.
-- Support `direction="high"` and `direction="low"`.
-- Support `n_per_tile`.
-- Support `border_margin_px` by excluding objects whose bbox crosses the
-  tile margin.
-- Convert image centroids to stage coordinates per tile.
-- Emit JSON-native `targets`.
-
-V1 must not:
-
-- read masks
-- run `regionprops`
-- segment images
-- compute deep features
-- apply undocumented auto-thresholds
-
-Auto-thresholds are required later for migration parity, but not in V1.
-When added, the rule must be explicit and test-pinned.
-
-Target discovery tests:
-
-- rank by feature from the table
-- high and low direction
-- explicit threshold filtering
-- `n_per_tile` per tile
-- `border_margin_px` using each tile's image size
-- stage conversion per tile
-- no numpy scalar values in output
-- `n_per_tile=None` returns all valid targets
-- missing required columns fail clearly
-
-### Phase 5: Object Detection
-
-Add:
+The clustering table is the source of truth. It must include:
 
 ```text
-workflows/object_detection/
-  README.md
-  pipelines/object_detection.yaml
-  steps/detect_objects.py
-  steps/extract_object_features.py
-  steps/package_objects.py
-  tests/test_object_detection.py
-  run_pipeline.py
+object_id
+tile_id
+object_label
+stage_x_um
+stage_y_um
+centroid_row_px
+centroid_col_px
+area
+intensity_mean
+eccentricity
+cluster_id
+umap_x
+umap_y
 ```
 
-Pipeline:
+When `output_dir` is provided, clustering writes:
 
 ```text
-detect_objects -> extract_object_features -> package_objects
+features/clusters.csv
+features/clusters.json
+features/clusters_umap.svg
 ```
 
-`detect_objects`:
+The scatterplot is a visual artifact of the table, not a replacement for
+the table.
 
-- read TIFF input
-- handle 2D, channel-first, and channel-last data
-- use warm Cellpose state
-- output masks, image, and image size for downstream internal steps
+## Shared Modules
 
-`extract_object_features`:
-
-- wrapper over `_features.py`
-- literal `METADATA`
-
-`package_objects`:
-
-- convert internal detection and feature outputs to the public tile
-  detection contract
-- normalize feature names to the public scalar column names
-- attach required geometry from input
-- call `validate_tile_detection`
-
-The required feature-name mapping is:
-
-| `_features.py` / `regionprops_table` column | Public object column |
-|---|---|
-| `label` | `label` |
-| `centroid-0` | `centroid_row_px` |
-| `centroid-1` | `centroid_col_px` |
-| `bbox-0` | `bbox_min_row_px` |
-| `bbox-1` | `bbox_min_col_px` |
-| `bbox-2` | `bbox_max_row_px` |
-| `bbox-3` | `bbox_max_col_px` |
-| `area` | `area` |
-| `intensity_mean` | `intensity_mean` |
-| `eccentricity` | `eccentricity` |
-
-Use the geometric centroid, not `weighted_centroid`, for
-`centroid_row_px` and `centroid_col_px`.
-
-Public pixel coordinate columns are always unscaled pixel coordinates.
-Do not pass `spacing=` when computing the required public coordinate and
-bbox fields. Physical-unit feature columns may be added later under
-separate explicit names.
-
-Object detection tests:
-
-- valid detection output
-- empty detection output
-- sparse label row alignment
-- geometry validation
-- scalar public coordinate fields
-- no numpy scalar values
-- optional Cellpose-marked real run
-
-### Phase 6: Handoff
-
-Add a handoff test in:
+Shared workflow code lives under `workflows/`:
 
 ```text
-workflows/target_discovery/tests/test_handoff.py
+_contracts.py      JSON-native handoff validation and overview IO
+_features.py       classical feature extraction implementation
+_geometry.py       image row/col to stage x/y conversion
+_segmentation.py   TIFF loading and Cellpose segmentation
+_object_ids.py     stable tile/object naming
+_object_crops.py   crop extraction for deep features
 ```
 
-The test should:
-
-1. Build two or more synthetic validated tile detections.
-2. Assemble `{"tiles": [...]}`.
-3. Run `discover_targets`.
-4. Validate the target output.
-5. Assert per-tile quota and per-tile stage conversion.
-
-Later, once `object_detection` is implemented, add a non-Cellpose
-handoff test that runs object packaging outputs through discovery.
+Step files remain real engine steps with literal top-level `METADATA`.
+Do not import `METADATA` from shared modules; the engine reads it with
+AST literal parsing.
 
 ## Verification
 
-Before committing implementation work, run:
+Run the public fast path:
 
 ```bash
-pytest workflows/target_discovery/tests/
-pytest workflows/object_detection/tests/ -m "not cellpose"
-pytest workflows/cell_analysis/tests/ -m "not cellpose"
-pytest workflows/target_acquisition/tests/ -m "not cellpose"
-pytest -m "not cellpose and not slow"
+pytest -m "not cellpose and not deep and not cluster and not conda_env"
 ```
 
-`target_acquisition` tests must stay green throughout.
+Run the object/target focused suites:
 
-## Documentation
+```bash
+pytest workflows/object_analysis/tests/ -m "not cellpose and not deep"
+pytest workflows/target_discovery/tests/ -m "not cluster"
+pytest workflows/target_discovery/tests/ -m cluster
+```
 
-Add public, generic READMEs for the new workflows.
+Run real Cellpose and DINO checks from capable environments before
+publishing:
 
-Root README wording:
-
-- `object_detection`: detects and measures objects in acquired image
-  tiles.
-- `target_discovery`: selects revisit targets from object tables.
-- `target_acquisition`: combined target-acquisition workflow.
-
-Keep workflow documentation generic to Smart Analysis. Do not include
-private deployment details or repo-specific integration context.
-
-## Later Work
-
-The v1 build contract is intentionally narrow. The forward object
-workflow design now lives in
-[`docs/Object_Workflow_Plan.md`](docs/Object_Workflow_Plan.md), including:
-
-- the v1 rename to `extract_classical_features` and `build_object_table`
-- optional `extract_deep_features`
-- the two-level tile/object analysis model
-- scalable `tiles/`, `objects/`, and `features/` persistence
-- future target-discovery expansion
-
-Keep `BUILD_SPEC.md` as the implemented v1 build contract. Keep
-`Object_Workflow_Plan.md` as the living design for the next phases.
+```bash
+pytest workflows/object_analysis/tests/ -m cellpose
+pytest workflows/object_analysis/tests/ -m deep
+```
