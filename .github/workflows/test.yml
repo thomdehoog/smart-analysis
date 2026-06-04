@@ -46,5 +46,7 @@ jobs:
       - name: Run pytest
         # Skip markers that require resources we don't provision in CI:
         #   cellpose   -- needs cellpose + torch + skimage installed
+        #   deep       -- needs torch / DINO model access
+        #   cluster    -- needs kNN / Leiden / UMAP env
         #   conda_env  -- needs SMART--basic_test--env_a/b/c conda envs
-        run: pytest -m "not cellpose and not conda_env" --tb=short
+        run: pytest -m "not cellpose and not deep and not cluster and not conda_env" --tb=short
