@@ -1,0 +1,26 @@
+# Object-centered analysis with optional DINOv2 embeddings.
+
+metadata:
+  purpose: "Object-centered image analysis with deep features"
+  version: "1.0"
+  verbose: 1
+  functions_dir: "../steps"
+
+object_analysis:
+  - detect_objects:
+      diameter: null
+      channel: 0
+      gpu: false
+
+  - extract_classical_features:
+
+  - extract_deep_features:
+      backend: "dinov2"
+      model_name: "dinov2_vitb14"
+      input_size_px: 518
+      batch_size: 8
+      context_multiplier: 1.5
+      min_crop_size_px: 64
+      crop_mode: "neighborhood"
+
+  - build_object_table:

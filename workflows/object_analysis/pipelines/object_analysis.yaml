@@ -1,0 +1,17 @@
+# Object-centered analysis for one acquired image tile.
+
+metadata:
+  purpose: "Object-centered image analysis"
+  version: "1.0"
+  verbose: 1
+  functions_dir: "../steps"
+
+object_analysis:
+  - detect_objects:
+      diameter: null
+      channel: 0
+      gpu: false
+
+  - extract_classical_features:
+
+  - build_object_table:

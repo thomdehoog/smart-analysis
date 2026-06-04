@@ -1,0 +1,152 @@
+# `object_analysis` workflow
+
+Object-centered analysis for one acquired image tile.
+
+Classical path:
+
+```text
+detect_objects -> extract_classical_features -> build_object_table
+```
+
+Deep-feature path:
+
+```text
+detect_objects -> extract_classical_features -> extract_deep_features -> build_object_table
+```
+
+`extract_deep_features` is optional. Include the deep YAML when DINOv2
+embeddings and object crops are needed; otherwise use the classical YAML.
+
+## Input Payload
+
+Submit one tile at a time:
+
+```python
+{
+    "image_path": "path/to/tile.ome.tiff",
+    "tile_id": ["R0", 3, 7],
+    "tile_stage_xy_um": [10000.0, 15000.0],
+    "tile_zwide_um": 2500.0,
+    "source_pixel_size_um": [0.65, 0.65],
+    "source_image_size_px": [2048, 2048],
+    "image_to_stage": [[0.0, -1.0], [1.0, 0.0]],
+    "channel": 0,
+    "diameter": None,
+    "gpu": False,
+}
+```
+
+Optional artifact persistence:
+
+```python
+{
+    "output_dir": "analysis/object_analysis/run_001"
+}
+```
+
+When `output_dir` is provided on the deep path, `extract_deep_features`
+writes tile masks and per-object crop artifacts under `tiles/` and
+`objects/`. Classical-only runs do not cut crops by default.
+
+## Output
+
+The stable public result is stored under
+`pipeline_data["object_analysis"]`:
+
+```python
+{
+    "objects": {
+        "properties": {
+            "label": [1, 2],
+            "object_id": ["R0_r003_c007_obj00001", "R0_r003_c007_obj00002"],
+            "centroid_row_px": [120.5, 340.0],
+            "centroid_col_px": [220.0, 410.5],
+            "bbox_min_row_px": [100, 320],
+            "bbox_min_col_px": [200, 390],
+            "bbox_max_row_px": [145, 365],
+            "bbox_max_col_px": [245, 435],
+            "stage_x_um": [9990.0, 10012.0],
+            "stage_y_um": [15020.0, 14995.0],
+            "area": [900.0, 1200.0],
+            "intensity_mean": [132.5, 98.2],
+            "eccentricity": [0.2, 0.6]
+        },
+        "embeddings": {
+            "label": [1, 2],
+            "vectors": [[...], [...]],
+            "model": "dinov2_vitb14",
+            "backend": "dinov2"
+        },
+        "n_objects": 2
+    },
+    "geometry": {
+        "tile_id": ["R0", 3, 7],
+        "tile_stage_xy_um": [10000.0, 15000.0],
+        "tile_zwide_um": 2500.0,
+        "source_pixel_size_um": [0.65, 0.65],
+        "source_image_size_px": [2048, 2048],
+        "image_to_stage": [[0.0, -1.0], [1.0, 0.0]]
+    }
+}
+```
+
+The `embeddings` block appears only in the deep-feature pipeline.
+Crop-path columns also appear only in the deep-feature pipeline.
+Additional classical feature columns are allowed as row-aligned
+pass-through data inside `objects["properties"]`.
+
+## Environment
+
+Build the workflow environments with:
+
+```bash
+cd workflows/object_analysis/environments
+python setup_env.py
+python setup_env.py --step classical
+```
+
+The default `vision` environment is for Cellpose detection and optional
+DINOv2 embedding extraction. The `classical` environment is for
+scikit-image feature extraction. This keeps the Torch/Cellpose stack
+separate from the scikit-image/SciPy stack while installing PyTorch only
+once.
+
+Remove them with:
+
+```bash
+python clean_env.py
+```
+
+## Run
+
+Classical features only:
+
+```bash
+python workflows/object_analysis/run_pipeline.py path/to/tile.ome.tiff
+```
+
+With DINOv2 embeddings:
+
+```bash
+python workflows/object_analysis/run_pipeline.py path/to/tile.ome.tiff --deep
+```
+
+Save a one-tile overview JSON:
+
+```bash
+python workflows/object_analysis/run_pipeline.py path/to/tile.ome.tiff --save-overview overview.json
+```
+
+## Test
+
+Fast tests:
+
+```bash
+pytest workflows/object_analysis/tests/ -m "not cellpose and not deep"
+```
+
+Real Cellpose end-to-end test:
+
+```bash
+pytest workflows/object_analysis/tests/ -m cellpose
+```
