@@ -18,6 +18,7 @@ from _contracts import load_overview  # noqa: E402
 
 WORKFLOW_DIR = Path(__file__).resolve().parent
 YAML_PATH = WORKFLOW_DIR / "pipelines" / "target_discovery.yaml"
+CLUSTER_YAML_PATH = WORKFLOW_DIR / "pipelines" / "target_discovery_cluster.yaml"
 
 
 def main():
@@ -25,6 +26,12 @@ def main():
         description="Select revisit targets from an overview JSON file."
     )
     parser.add_argument("overview_json", help="Path to a saved overview JSON file.")
+    parser.add_argument("--cluster", action="store_true", help="Cluster embeddings before selecting targets.")
+    parser.add_argument("--output-dir", default=None, help="Directory for clustering artifacts.")
+    parser.add_argument("--n-neighbors", type=int, default=15)
+    parser.add_argument("--leiden-resolution", type=float, default=1.0)
+    parser.add_argument("--umap-min-dist", type=float, default=0.1)
+    parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--feature", default="area")
     parser.add_argument("--direction", default="high", choices=["high", "low"])
     parser.add_argument("--n-per-tile", type=int, default=5)
@@ -45,14 +52,24 @@ def main():
         "area_threshold": args.area_threshold,
         "intensity_threshold": args.intensity_threshold,
     }
+    yaml_path = CLUSTER_YAML_PATH if args.cluster else YAML_PATH
+    if args.cluster:
+        payload.update({
+            "output_dir": args.output_dir,
+            "n_neighbors": args.n_neighbors,
+            "leiden_resolution": args.leiden_resolution,
+            "umap_min_dist": args.umap_min_dist,
+            "random_state": args.random_state,
+        })
 
-    print(f"Pipeline:      {YAML_PATH}")
+    print(f"Pipeline:      {yaml_path}")
     print(f"Overview:      {args.overview_json}")
+    print(f"Clustering:    {'yes' if args.cluster else 'no'}")
     print(f"Selection:     {args.feature} {args.direction}, n_per_tile={n_per_tile}")
     print()
 
     with Engine() as engine:
-        engine.register("target_discovery", str(YAML_PATH))
+        engine.register("target_discovery", str(yaml_path))
         engine.submit("target_discovery", payload)
 
         while True:
@@ -65,10 +82,19 @@ def main():
                 raise RuntimeError(f"{failure['step']}: {failure['error']}")
             time.sleep(0.2)
 
-    targets = results[0]["target_discovery"]["targets"]
+    result = results[0]["target_discovery"]
+    targets = result["targets"]
     print("=" * 60)
     print("  Result")
     print("=" * 60)
+    clusters = result.get("clusters")
+    if clusters:
+        print(f"  Clustered objects: {clusters['n_objects']}")
+        print(f"  Clusters:          {clusters['n_clusters']}")
+        artifacts = clusters.get("artifacts", {})
+        if artifacts:
+            print(f"  Cluster table:     {artifacts.get('cluster_table_csv')}")
+            print(f"  UMAP plot:         {artifacts.get('cluster_plot_svg')}")
     print(f"  Targets: {len(targets)}")
     for target in targets[:20]:
         print(

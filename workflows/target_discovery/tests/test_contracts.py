@@ -35,6 +35,8 @@ def make_tile(tile_id=("R0", 0, 0), labels=(1, 3, 5)):
                 "area": np.asarray([50.0, 80.0, 30.0][:n]),
                 "intensity_mean": np.asarray([5.0, 8.0, 3.0][:n]),
                 "eccentricity": np.asarray([0.1, 0.2, 0.3][:n]),
+                "stage_x_um": np.asarray([900.0, 950.0, 1000.0][:n]),
+                "stage_y_um": np.asarray([1900.0, 1950.0, 2000.0][:n]),
                 "optional_feature": np.asarray([np.nan, 1.5, 2.5][:n]),
             },
             "n_objects": np.int64(n),

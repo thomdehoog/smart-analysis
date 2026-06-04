@@ -11,10 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _contracts import validate_targets, validate_tile_detection  # noqa: E402
 
 
-_STEP_PATH = Path(__file__).resolve().parents[1] / "steps" / "discover_targets.py"
-_spec = importlib.util.spec_from_file_location("discover_targets", _STEP_PATH)
-discover_targets = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(discover_targets)
+_STEP_PATH = Path(__file__).resolve().parents[1] / "steps" / "select_targets.py"
+_spec = importlib.util.spec_from_file_location("select_targets", _STEP_PATH)
+select_targets = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(select_targets)
 
 
 def make_tile(
@@ -39,6 +39,8 @@ def make_tile(
                 "area": np.array([60.0, 100.0, 20.0]),
                 "intensity_mean": np.array([10.0, 40.0, 80.0]),
                 "eccentricity": np.array([0.3, 0.1, 0.9]),
+                "stage_x_um": np.array([1000.0, 1021.0, 990.0]),
+                "stage_y_um": np.array([2000.0, 2015.0, 1980.0]),
             },
             "n_objects": np.int64(3),
         },
@@ -58,7 +60,7 @@ def run_discovery(tiles, **input_overrides):
         "input": {"tiles": tiles, **input_overrides},
         "metadata": {"verbose": 0},
     }
-    return discover_targets.run(pipeline_data, {})["target_discovery"]["targets"]
+    return select_targets.run(pipeline_data, {})["target_discovery"]["targets"]
 
 
 def test_ranks_by_feature_from_table_per_tile():
@@ -106,19 +108,19 @@ def test_border_margin_uses_each_tile_image_size():
     assert [t["object_label"] for t in targets] == [2]
 
 
-def test_stage_conversion_reuses_row_col_to_xy_convention():
+def test_stage_coordinates_come_from_object_table():
     tile = make_tile(
         tile_stage_xy_um=(1000.0, 2000.0),
         image_to_stage=[[0.0, -1.0], [1.0, 0.0]],
     )
+    tile["objects"]["properties"]["stage_x_um"][1] = 1234.5
+    tile["objects"]["properties"]["stage_y_um"][1] = 2345.5
 
     target = run_discovery([tile], feature="area", n_per_tile=1)[0]
 
-    # label 2 centroid: row=20, col=80; image center=(50, 50);
-    # offset_x=(80-50)*0.5=15, offset_y=(20-50)*0.7=-21.
     assert target["object_label"] == 2
-    assert target["stage_x_um"] == pytest.approx(1021.0)
-    assert target["stage_y_um"] == pytest.approx(2015.0)
+    assert target["stage_x_um"] == pytest.approx(1234.5)
+    assert target["stage_y_um"] == pytest.approx(2345.5)
 
 
 def test_output_contains_no_numpy_scalars():

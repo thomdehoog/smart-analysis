@@ -1,4 +1,4 @@
-# Select revisit targets from an aggregated object-detection overview.
+# Select revisit targets from an aggregated object-analysis overview.
 
 metadata:
   purpose: "Target discovery from object tables"
@@ -7,7 +7,7 @@ metadata:
   functions_dir: "../steps"
 
 target_discovery:
-  - discover_targets:
+  - select_targets:
       feature: "area"
       direction: "high"
       n_per_tile: 5

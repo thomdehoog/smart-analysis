@@ -1,0 +1,23 @@
+# Cluster objects from an aggregated object-analysis overview, then select targets.
+
+metadata:
+  purpose: "Target discovery with embedding clustering"
+  version: "1.0"
+  verbose: 1
+  functions_dir: "../steps"
+
+target_discovery:
+  - cluster_objects:
+      n_neighbors: 15
+      leiden_resolution: 1.0
+      random_state: 0
+      umap_min_dist: 0.1
+      output_dir: null
+
+  - select_targets:
+      feature: "area"
+      direction: "high"
+      n_per_tile: 5
+      border_margin_px: 0
+      area_threshold: null
+      intensity_threshold: null

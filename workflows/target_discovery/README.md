@@ -1,9 +1,15 @@
 # `target_discovery` workflow
 
-Select revisit targets from object-detection tables.
+Select revisit targets from object-analysis tables.
 
 ```
-discover_targets
+select_targets
+```
+
+Optional clustering path:
+
+```text
+cluster_objects -> select_targets
 ```
 
 This workflow is the selection phase. It consumes an aggregated overview:
@@ -61,7 +67,7 @@ stage coordinates are x/y microns.
 
 ## Run
 
-Use an overview JSON written by the object-detection contract helpers:
+Use an overview JSON written by the object-analysis contract helpers:
 
 ```bash
 python workflows/target_discovery/run_pipeline.py overview.json
@@ -69,8 +75,48 @@ python workflows/target_discovery/run_pipeline.py overview.json --feature intens
 python workflows/target_discovery/run_pipeline.py overview.json --all
 ```
 
+Cluster embeddings first, then select:
+
+```bash
+python workflows/target_discovery/run_pipeline.py overview.json --cluster --output-dir analysis/target_discovery/run_001
+```
+
+The clustering path builds a cosine kNN graph on object embeddings,
+runs Leiden clustering, computes UMAP coordinates, and writes both a
+table and a scatterplot. The table is the source of truth and includes
+object identity, absolute `stage_x_um` / `stage_y_um`, `cluster_id`,
+`umap_x`, and `umap_y`. The scatterplot is a visual artifact of that
+same table.
+
+## Environment
+
+The simple `select_targets` step is lightweight and runs in
+`SMART--target_discovery--main` when used through the engine's environment
+switching.
+
+Build it with:
+
+```bash
+cd workflows/target_discovery/environments
+python setup_env.py
+```
+
+The clustering path uses a separate environment for kNN, Leiden, and
+UMAP dependencies:
+
+```bash
+python setup_env.py --step cluster
+```
+
+Remove target-discovery environments with:
+
+```bash
+python clean_env.py
+```
+
 ## Test
 
 ```bash
 pytest workflows/target_discovery/tests/
+pytest workflows/target_discovery/tests/ -m cluster
 ```

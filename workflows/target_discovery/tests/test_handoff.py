@@ -11,10 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _contracts import validate_overview, validate_targets, validate_tile_detection  # noqa: E402
 
 
-_STEP_PATH = Path(__file__).resolve().parents[1] / "steps" / "discover_targets.py"
-_spec = importlib.util.spec_from_file_location("discover_targets_handoff", _STEP_PATH)
-discover_targets = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(discover_targets)
+_STEP_PATH = Path(__file__).resolve().parents[1] / "steps" / "select_targets.py"
+_spec = importlib.util.spec_from_file_location("select_targets_handoff", _STEP_PATH)
+select_targets = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(select_targets)
 
 
 def _tile(tile_id, stage_xy, label_offset):
@@ -31,6 +31,8 @@ def _tile(tile_id, stage_xy, label_offset):
                 "area": np.array([20.0, 80.0]),
                 "intensity_mean": np.array([5.0, 8.0]),
                 "eccentricity": np.array([0.1, 0.2]),
+                "stage_x_um": np.array([stage_xy[0], stage_xy[0] + 25.0]),
+                "stage_y_um": np.array([stage_xy[1], stage_xy[1] - 25.0]),
             },
             "n_objects": 2,
         },
@@ -53,7 +55,7 @@ def test_validated_overview_hands_off_to_discovery_per_tile():
         ]
     })
 
-    result = discover_targets.run({
+    result = select_targets.run({
         "input": {
             "tiles": overview["tiles"],
             "feature": "area",

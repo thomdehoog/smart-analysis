@@ -1,4 +1,4 @@
-"""discover_targets -- select stage targets from object detection tables."""
+"""select_targets -- select stage targets from object-analysis tables."""
 
 from __future__ import annotations
 
@@ -7,18 +7,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _contracts import validate_overview, validate_targets  # noqa: E402
-from _geometry import image_point_to_stage_xy  # noqa: E402
 
 
 METADATA = {
-    "description": "Select revisit targets from object detection tables",
+    "description": "Select revisit targets from object-analysis tables",
     "version": "1.0",
     "max_workers": 1,
+    "environment": "SMART--target_discovery--main",
 }
 
 
 def run(pipeline_data: dict, state: dict, **params) -> dict:
-    """Engine entry point for target discovery.
+    """Engine entry point for target selection.
 
     Input is an aggregated overview under ``pipeline_data["input"]["tiles"]``.
     The step never reads masks or recomputes region properties; it ranks
@@ -54,7 +54,9 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         )
         targets.extend(tile_targets)
 
-    result = validate_targets({"targets": targets})
+    result = dict(pipeline_data.get("target_discovery", {}))
+    result["targets"] = targets
+    result = validate_targets(result)
     pipeline_data["target_discovery"] = result
     return pipeline_data
 
@@ -92,15 +94,6 @@ def _targets_for_tile(
         if score is None:
             continue
 
-        stage_x_um, stage_y_um = image_point_to_stage_xy(
-            centroid_row_px=props["centroid_row_px"][row],
-            centroid_col_px=props["centroid_col_px"][row],
-            image_size_px=geometry["source_image_size_px"],
-            pixel_size_um=geometry["source_pixel_size_um"],
-            tile_stage_xy_um=geometry["tile_stage_xy_um"],
-            image_to_stage=geometry["image_to_stage"],
-        )
-
         label = int(props["label"][row])
         tile_id = list(geometry["tile_id"])
         candidates.append({
@@ -115,8 +108,8 @@ def _targets_for_tile(
             "bbox_min_col_px": int(props["bbox_min_col_px"][row]),
             "bbox_max_row_px": int(props["bbox_max_row_px"][row]),
             "bbox_max_col_px": int(props["bbox_max_col_px"][row]),
-            "stage_x_um": float(stage_x_um),
-            "stage_y_um": float(stage_y_um),
+            "stage_x_um": float(props["stage_x_um"][row]),
+            "stage_y_um": float(props["stage_y_um"][row]),
         })
 
     reverse = direction == "high"
