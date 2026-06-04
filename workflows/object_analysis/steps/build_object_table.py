@@ -171,6 +171,7 @@ def _strip_heavy_intermediates(pipeline_data: dict) -> None:
     pipeline_data.pop("extract_deep_features", None)
     detection = pipeline_data.get("detect_objects")
     if isinstance(detection, dict):
+        detection.pop("image", None)
         detection.pop("image_2d", None)
         detection.pop("masks", None)
 

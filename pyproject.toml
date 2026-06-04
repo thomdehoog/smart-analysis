@@ -56,6 +56,7 @@ markers = [
     "cellpose: requires real cellpose + skimage in the active env",
     "deep: requires Torch/DINO model access in the active env",
     "cluster: requires SMART--target_discovery--cluster for kNN/Leiden/UMAP",
+    "pooch: uses public skimage sample data downloaded/cached by pooch",
     "conda_env: requires SMART--basic_test--env_a conda env",
 ]
 addopts = [

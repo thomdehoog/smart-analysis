@@ -30,11 +30,14 @@ Submit one tile at a time:
     "source_pixel_size_um": [0.65, 0.65],
     "source_image_size_px": [2048, 2048],
     "image_to_stage": [[0.0, -1.0], [1.0, 0.0]],
-    "channel": 0,
-    "diameter": None,
+    "channels": None,
     "gpu": False,
 }
 ```
+
+`channels=None` keeps up to three channels for 2D+channels input. Pass an
+explicit list such as `[0, 2]` to choose channels from a larger stack. Plain
+2D images accept `None` or `[0]`; any other channel is rejected.
 
 Optional artifact persistence:
 
@@ -69,6 +72,9 @@ The stable public result is stored under
             "stage_y_um": [15020.0, 14995.0],
             "area": [900.0, 1200.0],
             "intensity_mean": [132.5, 98.2],
+            "intensity_mean_c0": [132.5, 98.2],
+            "intensity_mean_c1": [80.0, 72.0],
+            "intensity_mean_c2": [44.0, 55.0],
             "eccentricity": [0.2, 0.6]
         },
         "embeddings": {

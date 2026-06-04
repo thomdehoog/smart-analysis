@@ -24,7 +24,9 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     inp = pipeline_data["input"]
     backend = _setting(inp, params, "backend", "dinov2")
     crop_result = extract_object_crops(
-        image=pipeline_data["detect_objects"]["image_2d"],
+        image=pipeline_data["detect_objects"].get(
+            "image", pipeline_data["detect_objects"]["image_2d"]
+        ),
         masks=pipeline_data["detect_objects"]["masks"],
         tile_id=inp["tile_id"],
         context_multiplier=float(
@@ -183,11 +185,22 @@ def _forward_dinov2(model, batch, torch):
 def _as_rgb(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return np.repeat(image[:, :, None], 3, axis=2)
-    if image.ndim == 3 and image.shape[2] >= 3:
-        return image[:, :, :3]
-    if image.ndim == 3 and image.shape[0] >= 3:
-        return np.moveaxis(image[:3], 0, -1)
-    raise ValueError(f"Cannot convert crop with shape {image.shape} to RGB.")
+    if image.ndim == 3:
+        if image.shape[0] <= 4 and image.shape[2] > 4:
+            raise ValueError(
+                f"Cannot convert crop with shape {image.shape} to RGB. "
+                "Expected a 2D crop or a channel-last 2D+channels crop."
+            )
+        n_channels = image.shape[2]
+        if n_channels >= 3:
+            return image[:, :, :3]
+        if n_channels >= 1:
+            pad = np.repeat(image[:, :, -1:], 3 - n_channels, axis=2)
+            return np.concatenate([image, pad], axis=2)
+    raise ValueError(
+        f"Cannot convert crop with shape {image.shape} to RGB. "
+        "Expected a 2D crop or a channel-last 2D+channels crop."
+    )
 
 
 def _percentile_normalize(image: np.ndarray) -> np.ndarray:

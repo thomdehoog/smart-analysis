@@ -8,8 +8,7 @@ metadata:
 
 object_analysis:
   - detect_objects:
-      diameter: null
-      channel: 0
+      channels: null
       gpu: false
 
   - extract_classical_features:

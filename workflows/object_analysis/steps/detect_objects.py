@@ -23,8 +23,7 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     detection = segment_tiff(
         inp["image_path"],
         state,
-        channel=inp.get("channel", params.get("channel", 0)),
-        diameter=inp.get("diameter", params.get("diameter", None)),
+        channels=inp.get("channels", params.get("channels", None)),
         gpu=inp.get("gpu", params.get("gpu", False)),
         verbose=verbose,
         log_prefix="detect_objects",
@@ -32,7 +31,7 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
 
     pipeline_data["detect_objects"] = detection
     # Bridge to the shared classical feature extractor's current input contract.
-    pipeline_data["preprocess"] = {"image": detection["image_2d"]}
+    pipeline_data["preprocess"] = {"image": detection["image"]}
     pipeline_data["segment"] = {
         "masks": detection["masks"],
         "n_cells": detection["n_objects"],

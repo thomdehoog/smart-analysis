@@ -22,6 +22,7 @@ The most-used:
 - ``cellpose`` -- requires cellpose + skimage in the active env
 - ``deep`` -- requires torch / DINO in the active env
 - ``cluster`` -- requires SMART--target_discovery--cluster
+- ``pooch`` -- uses public skimage sample data downloaded/cached by pooch
 - ``conda_env`` -- requires SMART--basic_test--env_a
 """
 

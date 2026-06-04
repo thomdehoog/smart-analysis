@@ -177,7 +177,8 @@ Tests marked `cellpose` require Cellpose and Torch in the active
 environment and skip cleanly when those imports fail. Tests marked
 `deep` require a Torch/DINO-capable environment. Tests marked
 `cluster` require the target-discovery clustering environment. Tests marked
-`conda_env` require the small test environments created by
+`pooch` use public scikit-image sample data downloaded/cached by pooch.
+Tests marked `conda_env` require the small test environments created by
 `workflows/basic_test/environments/setup_env.py`.
 
 ## Limitations

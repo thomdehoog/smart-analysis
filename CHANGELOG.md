@@ -16,6 +16,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
   object tables and tile geometry.
 - Optional `target_discovery` clustering path with cosine kNN, Leiden
   clustering, UMAP coordinates, CSV/JSON tables, and SVG scatterplots.
+- Multichannel `object_analysis` support for 2D images with channels:
+  Cellpose can segment up to three selected channels, and classical
+  intensity/texture outputs include row-aligned `_cN` per-channel columns.
 - Shared workflow contract, geometry, segmentation, and feature modules
   under `workflows/`.
 - Conda setup and cleanup scripts for the
@@ -58,6 +61,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
   command is offline after installation.
 - Workflow steps now use the current scikit-image 0.26 regionprops
   intensity attribute names with compatibility fallbacks.
+- `object_analysis.detect_objects` now uses Cellpose-SAM without the
+  vestigial diameter parameter and passes `channel_axis=-1` for
+  multichannel inputs.
 - Scoped failure aggregation now prunes consumed failures from pipeline
   status while preserving unrelated scope failures.
 - Test files now follow the standard pytest idiom. Marker selectors such

@@ -61,6 +61,16 @@ def _write_human_mitosis_tile(tmp_path):
     return path, image
 
 
+def _write_immunohistochemistry_tile(tmp_path):
+    import tifffile
+    from skimage.data import immunohistochemistry
+
+    image = immunohistochemistry()
+    path = tmp_path / "immunohistochemistry.ome.tiff"
+    tifffile.imwrite(path, image, photometric="rgb")
+    return path, image
+
+
 def _payload(image_path: Path, **extra):
     payload = {
         "image_path": str(image_path),
@@ -70,8 +80,6 @@ def _payload(image_path: Path, **extra):
         "source_pixel_size_um": [2.0, 3.0],
         "source_image_size_px": [48, 40],
         "image_to_stage": [[1.0, 0.0], [0.0, 1.0]],
-        "channel": 0,
-        "diameter": None,
         "gpu": False,
     }
     payload.update(extra)
@@ -226,6 +234,33 @@ def test_embedding_row_alignment_is_validated(tmp_path):
         build_object_table.run(pipeline_data, {})
 
 
+def test_dino_rgb_conversion_handles_fewer_than_three_channels():
+    gray = np.full((6, 7), 11, dtype=np.uint8)
+    one = np.full((6, 7, 1), 13, dtype=np.uint8)
+    two = np.zeros((6, 7, 2), dtype=np.uint8)
+    two[..., 0] = 17
+    two[..., 1] = 19
+
+    gray_rgb = extract_deep_features._as_rgb(gray)
+    one_rgb = extract_deep_features._as_rgb(one)
+    two_rgb = extract_deep_features._as_rgb(two)
+
+    assert gray_rgb.shape == (6, 7, 3)
+    assert one_rgb.shape == (6, 7, 3)
+    assert two_rgb.shape == (6, 7, 3)
+    assert np.all(gray_rgb[..., 0] == 11)
+    assert np.all(one_rgb[..., 2] == 13)
+    assert np.all(two_rgb[..., 0] == 17)
+    assert np.all(two_rgb[..., 1] == 19)
+    assert np.all(two_rgb[..., 2] == 19)
+
+
+def test_dino_rgb_conversion_rejects_non_crop_shapes():
+    channel_first = np.zeros((2, 6, 7), dtype=np.uint8)
+    with pytest.raises(ValueError, match="2D crop"):
+        extract_deep_features._as_rgb(channel_first)
+
+
 def test_yaml_registers_classical_and_deep():
     from engine import Engine
 
@@ -290,6 +325,38 @@ def test_real_cellpose_object_analysis_end_to_end(tmp_path):
 
 
 @pytest.mark.cellpose
+@pytest.mark.pooch
+@pytest.mark.slow
+def test_real_cpsam_multichannel_immunohistochemistry_end_to_end(tmp_path):
+    image_path, image = _write_immunohistochemistry_tile(tmp_path)
+
+    result = _run_engine_workflow(
+        "object_analysis_real_cpsam_multichannel",
+        CLASSICAL_YAML,
+        _payload(
+            image_path,
+            tile_id=["IHC", 0, 0],
+            tile_stage_xy_um=[5000.0, 6000.0],
+            source_pixel_size_um=[0.5, 0.5],
+            source_image_size_px=[int(image.shape[1]), int(image.shape[0])],
+            image_to_stage=[[1.0, 0.0], [0.0, 1.0]],
+            channels=None,
+            gpu=True,
+        ),
+        timeout=240,
+    )
+    tile = validate_tile_detection(result["object_analysis"])
+    props = tile["objects"]["properties"]
+
+    assert tile["objects"]["n_objects"] > 0
+    for channel in range(3):
+        key = f"intensity_mean_c{channel}"
+        assert key in props
+        assert len(props[key]) == tile["objects"]["n_objects"]
+    assert props["intensity_mean"] == props["intensity_mean_c0"]
+
+
+@pytest.mark.cellpose
 @pytest.mark.deep
 @pytest.mark.slow
 def test_real_dinov2_embedding_end_to_end(tmp_path):
@@ -304,7 +371,6 @@ def test_real_dinov2_embedding_end_to_end(tmp_path):
             model_name="dinov2_vitb14",
             input_size_px=224,
             batch_size=1,
-            diameter=30,
             gpu=True,
             source_image_size_px=[int(image.shape[1]), int(image.shape[0])],
         ),
@@ -320,8 +386,8 @@ def test_real_dinov2_embedding_end_to_end(tmp_path):
 
 
 class _StubCellposeModel:
-    def eval(self, image_2d, diameter=None):
-        masks = np.zeros(image_2d.shape, dtype=np.int32)
+    def eval(self, x, channel_axis=None, **kwargs):
+        masks = np.zeros(x.shape[:2], dtype=np.int32)
         masks[5:11, 6:12] = 1
         masks[20:30, 25:35] = 2
         return masks, None, None

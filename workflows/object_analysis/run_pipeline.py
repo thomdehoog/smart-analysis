@@ -27,12 +27,15 @@ def _image_size_px(path: Path) -> list[int]:
     shape = tifffile.imread(path).shape
     if len(shape) == 2:
         ny, nx = shape
-    elif len(shape) == 3 and shape[0] <= 4:
+    elif len(shape) == 3 and shape[0] <= shape[-1]:
         _, ny, nx = shape
-    elif len(shape) == 3 and shape[2] <= 4:
+    elif len(shape) == 3:
         ny, nx, _ = shape
     else:
-        raise SystemExit(f"Cannot infer 2D image size from shape {shape}.")
+        raise SystemExit(
+            f"Cannot infer 2D image size from shape {shape}. "
+            "Expected (H, W), (H, W, C), or (C, H, W)."
+        )
     return [int(nx), int(ny)]
 
 
@@ -50,6 +53,18 @@ def _parse_matrix(text: str) -> list[list[float]]:
             "expected four comma-separated values, e.g. 1,0,0,1"
         )
     return [[values[0], values[1]], [values[2], values[3]]]
+
+
+def _parse_channels(text: str) -> list[int] | None:
+    text = text.strip()
+    if text.lower() in {"", "none", "auto"}:
+        return None
+    values = [int(part.strip()) for part in text.split(",")]
+    if len(values) > 3:
+        raise argparse.ArgumentTypeError("expected at most three channels")
+    if any(value < 0 for value in values):
+        raise argparse.ArgumentTypeError("channels must be non-negative")
+    return values
 
 
 def _parse_tile_id(text: str) -> list:
@@ -79,8 +94,13 @@ def main():
         default=[[1.0, 0.0], [0.0, 1.0]],
         help="2x2 image-to-stage matrix as a,b,c,d (default: identity).",
     )
-    parser.add_argument("--channel", type=int, default=0)
-    parser.add_argument("--diameter", type=float, default=None)
+    parser.add_argument(
+        "--channels",
+        type=_parse_channels,
+        default=None,
+        help="Comma-separated channel indices for 2D+channels input; "
+        "default auto keeps up to three channels.",
+    )
     parser.add_argument("--gpu", action="store_true", default=False)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--save-overview", default=None)
@@ -96,8 +116,7 @@ def main():
         "source_pixel_size_um": args.pixel_size_um,
         "source_image_size_px": _image_size_px(image_path),
         "image_to_stage": args.image_to_stage,
-        "channel": args.channel,
-        "diameter": args.diameter,
+        "channels": args.channels,
         "gpu": args.gpu,
     }
     if args.output_dir:
@@ -106,6 +125,8 @@ def main():
     print(f"Pipeline:      {yaml_path}")
     print(f"Image:         {image_path}")
     print(f"Tile:          {payload['tile_id']}")
+    channels = payload["channels"] if payload["channels"] is not None else "auto"
+    print(f"Channels:      {channels}")
     print(f"Deep features: {'yes' if args.deep else 'no'}")
     print()
 

@@ -48,7 +48,9 @@ environments do not exist. Tests marked `@pytest.mark.cellpose` skip when
 Cellpose or Torch cannot be imported. Tests marked `@pytest.mark.deep`
 need a Torch/DINO-capable environment such as
 `SMART--object_analysis--vision`. Tests marked `@pytest.mark.cluster`
-need `SMART--target_discovery--cluster`.
+need `SMART--target_discovery--cluster`. Tests marked `@pytest.mark.pooch`
+use public scikit-image sample data and skip if that fixture cannot be
+downloaded or loaded.
 
 ## Running tests
 
@@ -74,6 +76,9 @@ Defined in `pyproject.toml`:
 | `robustness` | Edge cases, error recovery, and resource cleanup. |
 | `adversarial` | Stress, race-condition, corruption, and protocol-attack tests. |
 | `slow` | Tests that legitimately take more than about 5 seconds. |
+| `deep` | Requires Torch/DINO model access, usually `SMART--object_analysis--vision`. |
+| `cluster` | Requires `SMART--target_discovery--cluster` for kNN/Leiden/UMAP. |
+| `pooch` | Uses public skimage sample data downloaded/cached by pooch. |
 | `cellpose` | Requires real Cellpose, scikit-image, and working Torch imports. |
 | `conda_env` | Requires the `SMART--basic_test--env_a` conda environment. |
 

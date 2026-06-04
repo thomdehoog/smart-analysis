@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import tifffile
 
 
@@ -9,16 +10,20 @@ def segment_tiff(
     image_path,
     state: dict,
     *,
-    channel: int = 0,
-    diameter=None,
+    channels=None,
     gpu: bool = False,
     verbose: int = 0,
     log_prefix: str = "segment",
 ) -> dict:
-    """Load a TIFF, extract a 2D plane, and run a warm Cellpose model."""
+    """Load a TIFF, select up to three channels, and run a warm Cellpose model.
+
+    Cellpose runs on the selected channels (2D or up to 3-channel). ``image``
+    preserves those selected channels for downstream feature extraction, while
+    ``image_2d`` is the primary channel for code paths that require a plane.
+    """
     image = tifffile.imread(image_path)
-    image_2d = ensure_2d(image, channel)
-    ny, nx = image_2d.shape
+    seg_input = select_channels(image, channels)
+    ny, nx = seg_input.shape[:2]
 
     if "model" not in state:
         from cellpose import models
@@ -27,13 +32,17 @@ def segment_tiff(
             print(f"  [{log_prefix}] cold start: loading CellposeModel(gpu={gpu})")
         state["model"] = models.CellposeModel(gpu=gpu)
 
-    masks, flows, styles = state["model"].eval(image_2d, diameter=diameter)
+    channel_axis = -1 if seg_input.ndim == 3 else None
+    masks, flows, styles = state["model"].eval(seg_input, channel_axis=channel_axis)
     n_objects = int(masks.max())
+
+    image_2d = seg_input if seg_input.ndim == 2 else seg_input[..., 0]
 
     if verbose >= 1:
         print(f"  [{log_prefix}] image={nx}x{ny}, objects={n_objects}")
 
     return {
+        "image": seg_input,
         "image_2d": image_2d,
         "masks": masks,
         "n_objects": n_objects,
@@ -41,29 +50,53 @@ def segment_tiff(
     }
 
 
-def ensure_2d(image, channel: int):
-    """Return one 2D plane from a 2D, channel-first, or channel-last image."""
-    if channel < 0:
-        raise ValueError(f"channel must be >= 0, got {channel}.")
+def select_channels(image, channels=None):
+    """Return up to three channels for Cellpose as ``(H, W)`` or ``(H, W, k)``.
+
+    ``channels`` chooses which channels to keep; ``None`` uses the first up to
+    three. Channel-first ``(C, H, W)`` input is normalized to channel-last, and a
+    single selected channel is returned as a 2D plane.
+    """
     if image.ndim == 2:
+        if channels is not None:
+            indices = _channel_indices(channels)
+            if indices not in ([], [0]):
+                raise ValueError("channels for a 2D image must be None or [0].")
         return image
-    if image.ndim == 3 and image.shape[0] <= 4:
-        n_ch = image.shape[0]
-        if channel >= n_ch:
+    if image.ndim != 3:
+        raise ValueError(
+            f"Cannot select channels from image with shape {image.shape}. "
+            f"Expected 2D (H, W) or 2D plus channels: (C, H, W) / (H, W, C)."
+        )
+
+    # The channel axis is the smaller end (channels are fewer than spatial
+    # dims); channel-first (C, H, W) is normalized to channel-last (H, W, C).
+    if image.shape[0] <= image.shape[-1]:
+        stack = np.moveaxis(image, 0, -1)
+    else:
+        stack = image
+
+    n_channels = stack.shape[-1]
+    if channels is None:
+        indices = list(range(min(n_channels, 3)))
+    else:
+        indices = _channel_indices(channels)
+        if not indices:
+            raise ValueError("channels must contain at least one channel.")
+        if len(indices) > 3:
+            raise ValueError("Cellpose accepts at most 3 channels.")
+        if any(c < 0 or c >= n_channels for c in indices):
             raise ValueError(
-                f"channel={channel} but image has {n_ch} channels "
-                f"(shape {image.shape}, C-first)."
+                f"channels {indices} out of range for {n_channels} channels."
             )
-        return image[channel]
-    if image.ndim == 3 and image.shape[2] <= 4:
-        n_ch = image.shape[2]
-        if channel >= n_ch:
-            raise ValueError(
-                f"channel={channel} but image has {n_ch} channels "
-                f"(shape {image.shape}, C-last)."
-            )
-        return image[:, :, channel]
-    raise ValueError(
-        f"Cannot extract 2D from image with shape {image.shape}. "
-        f"Expected 2D (H, W) or 3D (C, H, W) / (H, W, C) with C <= 4."
-    )
+
+    selected = stack[..., indices]
+    if selected.shape[-1] == 1:
+        return selected[..., 0]
+    return selected
+
+
+def _channel_indices(channels) -> list[int]:
+    if isinstance(channels, (int, np.integer)):
+        return [int(channels)]
+    return [int(c) for c in channels]

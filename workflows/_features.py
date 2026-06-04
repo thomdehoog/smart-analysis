@@ -120,6 +120,13 @@ METADATA = {
 # ---------------------------------------------------------------------------
 
 SYNTHETIC_PROPERTIES = {"intensity_median"}
+INTENSITY_PROPERTIES = (
+    "intensity_mean",
+    "intensity_min",
+    "intensity_max",
+    "intensity_std",
+    "intensity_median",
+)
 
 DEFAULT_PROPERTIES = [
     "label",
@@ -157,8 +164,8 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
             f"{sorted(EXTRAS)}."
         )
 
-    masks = pipeline_data["segment"]["masks"]
-    img = pipeline_data["preprocess"]["image"]
+    masks = np.asarray(pipeline_data["segment"]["masks"])
+    img = _normalise_image_axes(pipeline_data["preprocess"]["image"], masks.shape)
 
     spacing_kw = {"spacing": tuple(pixel_size_um)} if pixel_size_um else {}
     native_properties = [
@@ -168,6 +175,7 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         masks, intensity_image=img, properties=native_properties, **spacing_kw
     )
     _add_synthetic_properties(props, masks, img, properties)
+    _normalise_intensity_columns(props, img)
 
     labels = np.asarray(props.get("label", []))
     n_cells = int(len(labels))
@@ -195,6 +203,20 @@ def _add_synthetic_properties(
     if "intensity_median" not in properties:
         return
 
+    channels = _channel_images(img)
+    if channels is not None:
+        for idx, channel in enumerate(channels):
+            props[f"intensity_median_c{idx}"] = _intensity_medians(
+                masks, channel
+            )
+        props["intensity_median"] = props["intensity_median_c0"]
+        return
+
+    props["intensity_median"] = _intensity_medians(masks, img)
+
+
+def _intensity_medians(masks: np.ndarray, img: np.ndarray) -> np.ndarray:
+    """Return per-label median intensity in ascending label order."""
     from skimage.measure import regionprops
 
     medians = []
@@ -205,7 +227,63 @@ def _add_synthetic_properties(
             intensity_image = region.intensity_image
         values = intensity_image[region.image]
         medians.append(float(np.median(values)) if values.size else np.nan)
-    props["intensity_median"] = np.asarray(medians, dtype=float)
+    return np.asarray(medians, dtype=float)
+
+
+def _normalise_image_axes(img, mask_shape: tuple[int, int]) -> np.ndarray:
+    """Return image as 2D or channel-last ``(H, W, C)`` aligned to masks."""
+    arr = np.asarray(img)
+    if arr.ndim == 2 and arr.shape == mask_shape:
+        return arr
+    if arr.ndim == 3 and arr.shape[:2] == mask_shape:
+        return arr
+    if arr.ndim == 3 and arr.shape[1:] == mask_shape:
+        return np.moveaxis(arr, 0, -1)
+    raise ValueError(
+        f"image shape {arr.shape} is not aligned to mask shape {mask_shape}."
+    )
+
+
+def _channel_images(img: np.ndarray) -> tuple[np.ndarray, ...] | None:
+    """Return per-channel 2D images when ``img`` is channel-last."""
+    if np.asarray(img).ndim != 3:
+        return None
+    return tuple(img[..., idx] for idx in range(img.shape[-1]))
+
+
+def _primary_image(img: np.ndarray) -> np.ndarray:
+    """Return the primary 2D intensity image used for existing base columns."""
+    channels = _channel_images(img)
+    return img if channels is None else channels[0]
+
+
+def _normalise_intensity_columns(props: dict, img: np.ndarray) -> None:
+    """Expose multichannel intensity stats as base + ``_cN`` columns.
+
+    scikit-image emits multichannel intensity columns as ``name-0`` /
+    ``name-1``. The workflow contract uses ``name`` for the primary channel
+    and ``name_c0`` / ``name_c1`` / ... for explicit per-channel columns.
+    """
+    channels = _channel_images(img)
+    if channels is None:
+        return
+
+    n_channels = len(channels)
+    for base in INTENSITY_PROPERTIES:
+        for idx in range(n_channels):
+            skimage_key = f"{base}-{idx}"
+            public_key = f"{base}_c{idx}"
+            if public_key in props:
+                values = props[public_key]
+            elif skimage_key in props:
+                values = props.pop(skimage_key)
+            elif idx == 0 and base in props:
+                values = props[base]
+            else:
+                continue
+            props[public_key] = values
+            if idx == 0:
+                props[base] = values
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +330,34 @@ def _add_derived(props: dict) -> None:
                 std_i = np.asarray(props["intensity_std"], dtype=float)
                 props["intensity_cv"] = np.where(mean_i > 0, std_i / mean_i, np.nan)
 
+        for idx in _intensity_channel_indices(props):
+            mean_key = f"intensity_mean_c{idx}"
+            mean_i = np.asarray(props[mean_key], dtype=float)
+            if "num_pixels" in props:
+                n_px = np.asarray(props["num_pixels"], dtype=float)
+                props[f"intensity_total_c{idx}"] = mean_i * n_px
+            elif "area" in props:
+                props[f"intensity_total_c{idx}"] = mean_i * np.asarray(
+                    props["area"], dtype=float
+                )
+            std_key = f"intensity_std_c{idx}"
+            if std_key in props:
+                std_i = np.asarray(props[std_key], dtype=float)
+                props[f"intensity_cv_c{idx}"] = np.where(
+                    mean_i > 0, std_i / mean_i, np.nan
+                )
+
+
+def _intensity_channel_indices(props: dict) -> list[int]:
+    prefix = "intensity_mean_c"
+    indices = []
+    for key in props:
+        if key.startswith(prefix):
+            suffix = key[len(prefix):]
+            if suffix.isdigit():
+                indices.append(int(suffix))
+    return sorted(indices)
+
 
 # ---------------------------------------------------------------------------
 # Extras dispatcher.
@@ -269,7 +375,11 @@ class _Context:
     masks : ndarray
         Int label image of shape (H, W).
     img : ndarray
-        Raw intensity image (any non-negative dtype).
+        Primary 2D intensity image (any non-negative dtype).
+    channel_images : tuple[ndarray, ...] | None
+        Per-channel 2D images when the input was multichannel. Handlers use
+        this to add explicit ``_cN`` columns while preserving existing base
+        columns as channel 0.
     labels : ndarray
         1D array of label ids, in row order.
     slices : list | None
@@ -288,6 +398,7 @@ class _Context:
     props: dict
     masks: np.ndarray
     img: np.ndarray
+    channel_images: tuple[np.ndarray, ...] | None
     labels: np.ndarray
     slices: list | None
     params: dict
@@ -308,7 +419,8 @@ def _run_extras(props, masks, img, labels, extras, params, pixel_size_um) -> Non
     slices = find_objects(masks) if needs_bbox else None
 
     ctx = _Context(
-        props=props, masks=masks, img=img, labels=labels,
+        props=props, masks=masks, img=_primary_image(img),
+        channel_images=_channel_images(img), labels=labels,
         slices=slices, params=params, pixel_size_um=pixel_size_um,
     )
 
@@ -390,6 +502,21 @@ def _bbox_padded(slice_pair, pad: int, shape) -> tuple:
     )
 
 
+def _assign_columns(props: dict, values: dict[str, np.ndarray], suffix: str = "") -> None:
+    """Assign feature columns, optionally suffixing each column name."""
+    for key, value in values.items():
+        props[f"{key}{suffix}"] = value
+
+
+def _assign_channelised(ctx: _Context, compute: Callable[[np.ndarray], dict]) -> None:
+    """Assign base feature columns plus per-channel ``_cN`` columns."""
+    _assign_columns(ctx.props, compute(ctx.img))
+    if ctx.channel_images is None:
+        return
+    for idx, image in enumerate(ctx.channel_images):
+        _assign_columns(ctx.props, compute(image), suffix=f"_c{idx}")
+
+
 # ===========================================================================
 # Family: Intensity
 # ===========================================================================
@@ -407,6 +534,11 @@ def _global_bg_mean(ctx: _Context) -> None:
     bg_pixels = ctx.img[ctx.masks == 0]
     scalar = float(bg_pixels.mean()) if bg_pixels.size else float("nan")
     ctx.props["bg_global_mean"] = np.full(len(ctx.labels), scalar)
+    if ctx.channel_images is not None:
+        for idx, image in enumerate(ctx.channel_images):
+            bg_pixels = image[ctx.masks == 0]
+            scalar = float(bg_pixels.mean()) if bg_pixels.size else float("nan")
+            ctx.props[f"bg_global_mean_c{idx}"] = np.full(len(ctx.labels), scalar)
 
 
 def _local_bg_collar(ctx: _Context) -> None:
@@ -431,31 +563,51 @@ def _local_bg_collar(ctx: _Context) -> None:
         total_minus_local_bg  (intensity_mean - bg_local_mean) * num_pixels
         total_over_local_bg   intensity_total / bg_local_mean
     """
+    bg_local = _local_bg_values(ctx.img, ctx.masks, ctx.labels, ctx.slices, ctx.params)
+    ctx.props["bg_local_mean"] = bg_local
+    _add_local_bg_derivatives(ctx.props, bg_local)
+
+    if ctx.channel_images is not None:
+        for idx, image in enumerate(ctx.channel_images):
+            bg_local = _local_bg_values(
+                image, ctx.masks, ctx.labels, ctx.slices, ctx.params
+            )
+            suffix = f"_c{idx}"
+            ctx.props[f"bg_local_mean{suffix}"] = bg_local
+            _add_local_bg_derivatives(ctx.props, bg_local, suffix=suffix)
+
+
+def _local_bg_values(
+    img: np.ndarray,
+    masks: np.ndarray,
+    labels: np.ndarray,
+    slices: list,
+    params: dict,
+) -> np.ndarray:
     from scipy.ndimage import binary_fill_holes
     from skimage.morphology import dilation, disk
 
-    radius = int(ctx.params.get("bg_radius", 5))
-    n = len(ctx.labels)
-    bg_local = np.full(n, np.nan, dtype=np.float64)
+    radius = int(params.get("bg_radius", 5))
+    bg_local = np.full(len(labels), np.nan, dtype=np.float64)
     footprint = disk(radius)
 
-    for i, lab in enumerate(ctx.labels):
-        sl = ctx.slices[int(lab) - 1]
+    for i, lab in enumerate(labels):
+        sl = slices[int(lab) - 1]
         if sl is None:
             continue
-        sp = _bbox_padded(sl, radius + 1, ctx.masks.shape)
-        crop_lab = ctx.masks[sp]
+        sp = _bbox_padded(sl, radius + 1, masks.shape)
+        crop_lab = masks[sp]
         obj = crop_lab == lab
         filled = binary_fill_holes(obj)
         collar = dilation(filled, footprint=footprint) & ~filled & (crop_lab == 0)
         if collar.any():
-            bg_local[i] = float(ctx.img[sp][collar].mean())
-
-    ctx.props["bg_local_mean"] = bg_local
-    _add_local_bg_derivatives(ctx.props, bg_local)
+            bg_local[i] = float(img[sp][collar].mean())
+    return bg_local
 
 
-def _add_local_bg_derivatives(props: dict, bg_local: np.ndarray) -> None:
+def _add_local_bg_derivatives(
+    props: dict, bg_local: np.ndarray, suffix: str = ""
+) -> None:
     """Compute the four background-corrected intensity columns.
 
     Split out from ``_local_bg_collar`` so the bbox loop stays focussed on
@@ -464,10 +616,11 @@ def _add_local_bg_derivatives(props: dict, bg_local: np.ndarray) -> None:
     ``np.where`` when ``bg_local`` is zero for some objects.
     """
     with np.errstate(divide="ignore", invalid="ignore"):
-        if "intensity_mean" in props:
-            mean_i = np.asarray(props["intensity_mean"], dtype=float)
-            props["mean_minus_local_bg"] = mean_i - bg_local
-            props["mean_over_local_bg"] = np.where(
+        mean_key = f"intensity_mean{suffix}"
+        if mean_key in props:
+            mean_i = np.asarray(props[mean_key], dtype=float)
+            props[f"mean_minus_local_bg{suffix}"] = mean_i - bg_local
+            props[f"mean_over_local_bg{suffix}"] = np.where(
                 bg_local > 0, mean_i / bg_local, np.nan
             )
             n_px_key = (
@@ -476,10 +629,11 @@ def _add_local_bg_derivatives(props: dict, bg_local: np.ndarray) -> None:
             )
             if n_px_key is not None:
                 n_px = np.asarray(props[n_px_key], dtype=float)
-                props["total_minus_local_bg"] = (mean_i - bg_local) * n_px
-        if "intensity_total" in props:
-            tot = np.asarray(props["intensity_total"], dtype=float)
-            props["total_over_local_bg"] = np.where(
+                props[f"total_minus_local_bg{suffix}"] = (mean_i - bg_local) * n_px
+        total_key = f"intensity_total{suffix}"
+        if total_key in props:
+            tot = np.asarray(props[total_key], dtype=float)
+            props[f"total_over_local_bg{suffix}"] = np.where(
                 bg_local > 0, tot / bg_local, np.nan
             )
 
@@ -561,14 +715,21 @@ def _gradient_means(ctx: _Context) -> None:
         prewitt_magnitude_mean
         roberts_magnitude_mean
     """
+    _assign_channelised(
+        ctx,
+        lambda image: _gradient_values(image, ctx.masks, ctx.labels),
+    )
+
+
+def _gradient_values(
+    img: np.ndarray, masks: np.ndarray, labels: np.ndarray
+) -> dict[str, np.ndarray]:
     from skimage.filters import prewitt, roberts
 
-    ctx.props["prewitt_magnitude_mean"] = _per_label_mean(
-        prewitt(ctx.img), ctx.masks, ctx.labels
-    )
-    ctx.props["roberts_magnitude_mean"] = _per_label_mean(
-        roberts(ctx.img), ctx.masks, ctx.labels
-    )
+    return {
+        "prewitt_magnitude_mean": _per_label_mean(prewitt(img), masks, labels),
+        "roberts_magnitude_mean": _per_label_mean(roberts(img), masks, labels),
+    }
 
 
 def _statistical_texture(ctx: _Context) -> None:
@@ -586,25 +747,36 @@ def _statistical_texture(ctx: _Context) -> None:
         intensity_skewness     m3 / m2^(3/2)         (third standardised moment)
         intensity_kurtosis     m4 / m2^2 - 3         (Fisher excess kurtosis)
     """
-    n_bins = int(ctx.params.get("n_intensity_bins", 256))
-    img_arr = np.asarray(ctx.img)
+    _assign_channelised(
+        ctx,
+        lambda image: _statistical_texture_values(
+            image, ctx.masks, ctx.labels, ctx.params
+        ),
+    )
+
+
+def _statistical_texture_values(
+    img: np.ndarray, masks: np.ndarray, labels: np.ndarray, params: dict
+) -> dict[str, np.ndarray]:
+    n_bins = int(params.get("n_intensity_bins", 256))
+    img_arr = np.asarray(img)
     vmax = float(img_arr.max()) if img_arr.size else 1.0
     if vmax <= 0:
         vmax = 1.0
     img_q = np.clip(img_arr / vmax * (n_bins - 1), 0, n_bins - 1).astype(np.int64)
 
-    fg = ctx.masks > 0
-    label_to_row = np.full(int(ctx.masks.max()) + 1, -1, dtype=np.int64)
-    label_to_row[ctx.labels] = np.arange(len(ctx.labels))
+    fg = masks > 0
+    label_to_row = np.full(int(masks.max()) + 1, -1, dtype=np.int64)
+    label_to_row[labels] = np.arange(len(labels))
 
-    rows = label_to_row[ctx.masks[fg]]
+    rows = label_to_row[masks[fg]]
     vals = img_q[fg]
     valid = rows >= 0
     rows = rows[valid]; vals = vals[valid]
 
     counts = np.bincount(
-        rows * n_bins + vals, minlength=len(ctx.labels) * n_bins
-    ).reshape(len(ctx.labels), n_bins).astype(np.float64)
+        rows * n_bins + vals, minlength=len(labels) * n_bins
+    ).reshape(len(labels), n_bins).astype(np.float64)
     n_per = counts.sum(axis=1)
     p = np.divide(
         counts, n_per[:, None], out=np.zeros_like(counts), where=n_per[:, None] > 0
@@ -622,16 +794,18 @@ def _statistical_texture(ctx: _Context) -> None:
     m3 = (p * centered ** 3).sum(axis=1)
     m4 = (p * centered ** 4).sum(axis=1)
 
-    skewness = np.full(len(ctx.labels), np.nan)
-    kurtosis = np.full(len(ctx.labels), np.nan)
+    skewness = np.full(len(labels), np.nan)
+    kurtosis = np.full(len(labels), np.nan)
     nz = m2 > 0
     skewness[nz] = m3[nz] / (m2[nz] ** 1.5)
     kurtosis[nz] = m4[nz] / (m2[nz] ** 2) - 3.0
 
-    ctx.props["intensity_uniformity"] = uniformity
-    ctx.props["intensity_entropy"] = entropy
-    ctx.props["intensity_skewness"] = skewness
-    ctx.props["intensity_kurtosis"] = kurtosis
+    return {
+        "intensity_uniformity": uniformity,
+        "intensity_entropy": entropy,
+        "intensity_skewness": skewness,
+        "intensity_kurtosis": kurtosis,
+    }
 
 
 def _lbp_features(ctx: _Context) -> None:
@@ -647,25 +821,40 @@ def _lbp_features(ctx: _Context) -> None:
         lbp_mean, lbp_std, lbp_energy, lbp_entropy,
         lbp_skewness, lbp_kurtosis
     """
+    _assign_channelised(
+        ctx,
+        lambda image: _lbp_values(
+            image, ctx.masks, ctx.labels, ctx.slices, ctx.params
+        ),
+    )
+
+
+def _lbp_values(
+    img: np.ndarray,
+    masks: np.ndarray,
+    labels: np.ndarray,
+    slices: list,
+    params: dict,
+) -> dict[str, np.ndarray]:
     from skimage.feature import local_binary_pattern
     from skimage.measure import shannon_entropy
     from scipy.stats import skew as sstat_skew, kurtosis as sstat_kurt
 
-    P = int(ctx.params.get("lbp_P", 8))
-    R = float(ctx.params.get("lbp_R", 1))
-    method = str(ctx.params.get("lbp_method", "default"))
+    P = int(params.get("lbp_P", 8))
+    R = float(params.get("lbp_R", 1))
+    method = str(params.get("lbp_method", "default"))
 
-    lbp = local_binary_pattern(
-        _to_uint8(ctx.img), P=P, R=R, method=method
-    ).astype(np.int32)
+    lbp = local_binary_pattern(_to_uint8(img), P=P, R=R, method=method).astype(
+        np.int32
+    )
 
-    n = len(ctx.labels)
+    n = len(labels)
     out = np.full((n, 6), np.nan, dtype=np.float64)
-    for i, lab in enumerate(ctx.labels):
-        sl = ctx.slices[int(lab) - 1]
+    for i, lab in enumerate(labels):
+        sl = slices[int(lab) - 1]
         if sl is None:
             continue
-        v = lbp[sl][ctx.masks[sl] == lab]
+        v = lbp[sl][masks[sl] == lab]
         if v.size == 0:
             continue
         out[i, 0] = v.mean()
@@ -679,11 +868,13 @@ def _lbp_features(ctx: _Context) -> None:
             out[i, 4] = float(sstat_skew(v))
             out[i, 5] = float(sstat_kurt(v, fisher=True, bias=True))
 
-    for col, key in enumerate((
+    return {
+        key: out[:, col]
+        for col, key in enumerate((
         "lbp_mean", "lbp_std", "lbp_energy",
         "lbp_entropy", "lbp_skewness", "lbp_kurtosis",
-    )):
-        ctx.props[key] = out[:, col]
+        ))
+    }
 
 
 def _fft_features(ctx: _Context) -> None:
@@ -706,20 +897,35 @@ def _fft_features(ctx: _Context) -> None:
         fft_mean, fft_std, fft_energy, fft_entropy,
         fft_skewness, fft_kurtosis
     """
+    _assign_channelised(
+        ctx,
+        lambda image: _fft_values(
+            image, ctx.masks, ctx.labels, ctx.slices, ctx.params
+        ),
+    )
+
+
+def _fft_values(
+    img: np.ndarray,
+    masks: np.ndarray,
+    labels: np.ndarray,
+    slices: list,
+    params: dict,
+) -> dict[str, np.ndarray]:
     from scipy.stats import skew as sstat_skew, kurtosis as sstat_kurt
 
-    n_bins = int(ctx.params.get("fft_entropy_bins", 256))
-    n = len(ctx.labels)
+    n_bins = int(params.get("fft_entropy_bins", 256))
+    n = len(labels)
     out = np.full((n, 6), np.nan, dtype=np.float64)
 
-    for i, lab in enumerate(ctx.labels):
-        sl = ctx.slices[int(lab) - 1]
+    for i, lab in enumerate(labels):
+        sl = slices[int(lab) - 1]
         if sl is None:
             continue
-        m = ctx.masks[sl] == lab
+        m = masks[sl] == lab
         if not m.any():
             continue
-        crop = ctx.img[sl].astype(np.float64) * m
+        crop = img[sl].astype(np.float64) * m
         F = np.abs(np.fft.fftshift(np.fft.fft2(crop)))
         flat = F.ravel()
         out[i, 0] = float(flat.mean())
@@ -735,11 +941,13 @@ def _fft_features(ctx: _Context) -> None:
             out[i, 4] = float(sstat_skew(flat))
             out[i, 5] = float(sstat_kurt(flat, fisher=True, bias=True))
 
-    for col, key in enumerate((
+    return {
+        key: out[:, col]
+        for col, key in enumerate((
         "fft_mean", "fft_std", "fft_energy",
         "fft_entropy", "fft_skewness", "fft_kurtosis",
-    )):
-        ctx.props[key] = out[:, col]
+        ))
+    }
 
 
 def _glrlm_features(ctx: _Context) -> None:
@@ -761,8 +969,23 @@ def _glrlm_features(ctx: _Context) -> None:
         glrlm_hglre  high gray level run emphasis  sum_{g,r} P * g^2 / TR
         glrlm_glnu   gray level non-uniformity     sum_g (sum_r P)^2 / TR
     """
-    n_levels = int(ctx.params.get("glrlm_levels", 16))
-    img_arr = np.asarray(ctx.img)
+    _assign_channelised(
+        ctx,
+        lambda image: _glrlm_values(
+            image, ctx.masks, ctx.labels, ctx.slices, ctx.params
+        ),
+    )
+
+
+def _glrlm_values(
+    img: np.ndarray,
+    masks: np.ndarray,
+    labels: np.ndarray,
+    slices: list,
+    params: dict,
+) -> dict[str, np.ndarray]:
+    n_levels = int(params.get("glrlm_levels", 16))
+    img_arr = np.asarray(img)
     vmax = float(img_arr.max()) if img_arr.size else 1.0
     if vmax <= 0:
         vmax = 1.0
@@ -770,15 +993,15 @@ def _glrlm_features(ctx: _Context) -> None:
         img_arr.astype(np.float64) / vmax * (n_levels - 1), 0, n_levels - 1
     ).astype(np.int16)
 
-    n = len(ctx.labels)
+    n = len(labels)
     out = np.full((n, 4), np.nan, dtype=np.float64)
     g = np.arange(1, n_levels + 1, dtype=np.float64)[:, None]
 
-    for i, lab in enumerate(ctx.labels):
-        sl = ctx.slices[int(lab) - 1]
+    for i, lab in enumerate(labels):
+        sl = slices[int(lab) - 1]
         if sl is None:
             continue
-        m = ctx.masks[sl] == lab
+        m = masks[sl] == lab
         if not m.any():
             continue
         crop_q_obj = np.where(m, img_q[sl], -1).astype(np.int16)
@@ -795,10 +1018,12 @@ def _glrlm_features(ctx: _Context) -> None:
             float((sum_r ** 2).sum() / TR),
         ]
 
-    for col, key in enumerate((
+    return {
+        key: out[:, col]
+        for col, key in enumerate((
         "glrlm_rlnu", "glrlm_lglre", "glrlm_hglre", "glrlm_glnu",
-    )):
-        ctx.props[key] = out[:, col]
+        ))
+    }
 
 
 def _runs_in_line(line: np.ndarray):
