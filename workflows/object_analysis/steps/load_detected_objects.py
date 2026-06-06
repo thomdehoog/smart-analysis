@@ -77,7 +77,7 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
             "Detection checkpoint raw mask label count does not match n_raw_objects."
         )
 
-    area_params = area_filter_params(inp, params)
+    area_params = _reload_area_filter(inp, params, checkpoint)
     masks, dropped_labels = filter_masks_by_area(
         raw_masks,
         min_area_px=area_params["min_area_px"],
@@ -108,6 +108,8 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         "area_filter": {
             "min_area_px": area_params["min_area_px"],
             "max_area_px": area_params["max_area_px"],
+            "min_equivalent_diameter_um": area_params["min_equivalent_diameter_um"],
+            "max_equivalent_diameter_um": area_params["max_equivalent_diameter_um"],
         },
         "cellpose_params": checkpoint.get("cellpose_params", {}),
         "segmentation_resize": checkpoint.get("segmentation_resize", {}),
@@ -127,3 +129,37 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         "n_cells": detection["n_objects"],
     }
     return pipeline_data
+
+
+def _reload_area_filter(inp: dict, params: dict, checkpoint: dict) -> dict:
+    """Return feature-run object-size filter, defaulting to the checkpoint.
+
+    Detection writes raw masks plus the area filter that produced the detection
+    summary. Feature extraction may retune that post-segmentation filter from
+    raw masks, but an omitted filter must mean "use the checkpoint filter", not
+    "silently fall back to workflow YAML defaults".
+    """
+    filter_keys = (
+        "min_area_px",
+        "max_area_px",
+        "min_equivalent_diameter_um",
+        "max_equivalent_diameter_um",
+    )
+    explicit = any(
+        (key in inp and inp[key] is not None)
+        or (key in params and params[key] is not None)
+        for key in filter_keys
+    )
+    if explicit:
+        return area_filter_params(
+            inp | {"source_pixel_size_um": checkpoint["source_pixel_size_um"]},
+            params,
+        )
+
+    stored = checkpoint.get("area_filter", {})
+    return {
+        "min_area_px": stored.get("min_area_px"),
+        "max_area_px": stored.get("max_area_px"),
+        "min_equivalent_diameter_um": stored.get("min_equivalent_diameter_um"),
+        "max_equivalent_diameter_um": stored.get("max_equivalent_diameter_um"),
+    }

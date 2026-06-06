@@ -61,8 +61,12 @@ Each pick is a plain Python dict that includes:
 
 ## Environment
 
-`segment_tile` declares the workflow-owned conda environment
-`SMART--target_acquisition--main`. Build it with:
+On the microscope workstation, `segment_tile` declares the LAS X driver
+environment `lasxapi_extended` so notebook control and Cellpose overview
+analysis run from the same production environment.
+
+The legacy workflow-owned environment setup scripts are kept for
+standalone development:
 
 ```bash
 cd workflows/target_acquisition/environments
@@ -79,7 +83,7 @@ python clean_env.py
 
 ## Run
 
-After creating `SMART--target_acquisition--main`, run the shipped CLI:
+Run the shipped CLI from an environment with the engine installed:
 
 ```bash
 python workflows/target_acquisition/run_pipeline.py

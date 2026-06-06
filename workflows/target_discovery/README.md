@@ -93,7 +93,9 @@ Manual clustering uses `--n-neighbors` and `--leiden-resolution` directly.
 Auto clustering keeps `n_neighbors` fixed, sweeps Leiden resolution over a
 broad grid, refines intervals where the clustering changes, and reports a
 resolution-sweep table with cluster count, size balance, silhouette, and
-stability (ARI) scores. The selected resolution is a recommendation, not a
+stability (ARI) scores. UMAP layout has its own `--umap-n-neighbors` and
+`--umap-min-dist` parameters, so tuning the Leiden graph does not have to
+move the 2D display. The selected resolution is a recommendation, not a
 biological ground truth; inspect the score table and cluster galleries.
 
 ## Environment

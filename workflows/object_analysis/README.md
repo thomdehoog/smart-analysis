@@ -30,8 +30,8 @@ settings. The detection step writes masks plus a checkpoint JSON; the feature
 pipeline reloads that checkpoint and rejects stale masks when the recorded
 segmentation-parameter hash does not match the requested run.
 The hash covers true mask-generation parameters (`channels`, Cellpose
-thresholds, `niter`, `diameter`, and `max_segmentation_size_px`). It
-deliberately excludes GPU/CPU placement and area filters. Area filters are
+thresholds, `niter`, `diameter`, and `segmentation_binning`). It deliberately
+excludes GPU/CPU placement and area filters. Area filters are
 post-segmentation filters and can be retuned from the raw masks without
 running Cellpose again.
 
@@ -66,19 +66,29 @@ Object-size filtering is configured in the workflow YAML:
     flow_threshold: 0.4
     niter: null
     diameter: null
-    max_segmentation_size_px: 512
-    min_area_px: 1000
+    segmentation_binning: 1
+    min_area_px: null
     max_area_px: null
+    min_equivalent_diameter_um: null
+    max_equivalent_diameter_um: null
 ```
 
 `min_area_px` and `max_area_px` are area thresholds on the detected mask
-labels. Use `null` to disable either bound.
-`max_segmentation_size_px` downscales large tiles before Cellpose and then
-rescales masks back to the original image size; it never upsamples small
-tiles. `cellprob_threshold` controls how much marginal cell-probability is
-included (lower values usually produce larger/more masks), `flow_threshold`
-controls Cellpose's flow-consistency QC, and `niter` can be increased for
-very long objects.
+labels. For user-facing tuning across pixel sizes, prefer
+`min_equivalent_diameter_um` and `max_equivalent_diameter_um`: these are
+converted to area-pixel thresholds from `source_pixel_size_um` using the
+diameter of a circle with the same mask area. Use either pixel-area bounds or
+equivalent-diameter bounds for a given side, not both. Use `null` to disable
+either bound.
+`segmentation_binning` is the only segmentation-scale control: `1` runs
+Cellpose at full image resolution, `2` at roughly one-half linear resolution,
+and `4` at roughly one-quarter linear resolution. Masks are always rescaled
+back to the original image size before downstream features are computed.
+Choose binning from segmentation quality, not only speed; high binning can
+merge or miss small objects. `cellprob_threshold` controls how much marginal
+cell-probability is included (lower values usually produce larger/more masks),
+`flow_threshold` controls Cellpose's flow-consistency QC, and `niter` can be
+increased for very long objects.
 
 Optional artifact persistence:
 
@@ -102,7 +112,9 @@ To re-enter feature extraction from a saved detection checkpoint, submit:
 {
     "detection_checkpoint_path": "analysis/object_detection/tiles/R0_r003_c007/detection_checkpoint.json",
     "segmentation_params_hash": "<hash from detection>",
-    "min_area_px": 1000,
+    "min_equivalent_diameter_um": 10.0,
+    "max_equivalent_diameter_um": null,
+    "min_area_px": null,
     "max_area_px": null,
     "output_dir": "analysis/object_features/run_001",
 }
@@ -114,6 +126,8 @@ Deep crops are configured in `pipelines/object_analysis_deep.yaml`:
 - extract_deep_features:
     crop_size_px: 128
     mask: true
+    align_orientation: false
+    min_eccentricity_to_align: 0.4
     drop_incomplete_crops: true
 ```
 
@@ -125,9 +139,23 @@ Set `mask: false` only when local context should be embedded.
 boundary or whose bbox does not fit inside the fixed crop. For masked crops,
 the crop window may extend outside the tile and is zero-padded; for unmasked
 context crops, the full crop window must stay inside the tile. The DINO path
-does not perform adaptive intensity normalization; integer crops are converted
-by dtype range, and float crops must already be in `[0, 1]` from upstream
-preprocessing.
+accepts an optional run-level `input_intensity_scale`. When provided, the same
+per-channel foreground limits are applied to every crop before conversion to
+`[0, 1]`, preserving relative intensity differences across crops and channels.
+When omitted, integer crops are converted by dtype range and float crops must
+already be in `[0, 1]` from upstream preprocessing.
+
+`align_orientation: true` is optional and default-off. When enabled, sufficiently
+elongated objects are sampled directly in a rotated crop frame so their mask
+major axis follows the top-left to bottom-right diagonal in the final fixed
+crop. The angle is estimated from object-mask pixels via PCA, following the
+smart-selection crop convention but without first making and rotating an
+intermediate crop. Objects with eccentricity below
+`min_eccentricity_to_align` keep their original orientation so round cells are
+not rotated by noisy angles. Alignment changes only feature-crop sampling; it
+does not change which objects pass the crop-completeness checks. Crop audit
+columns record whether alignment was applied, the rotation angle, and the
+45-degree oriented extent (`crop_oriented_extent_px`).
 
 ## Output
 

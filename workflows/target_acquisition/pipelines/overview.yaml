@@ -10,6 +10,6 @@ overview:
   - segment_tile:
       diameter: null
       channel: 0
-      gpu: false
+      gpu: true
 
   - pick_targets:

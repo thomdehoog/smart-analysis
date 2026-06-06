@@ -17,7 +17,7 @@ def segment_tiff(
     flow_threshold=None,
     niter=None,
     diameter=None,
-    max_segmentation_size_px=None,
+    segmentation_binning=None,
     gpu: bool = True,
     verbose: int = 0,
     log_prefix: str = "segment",
@@ -33,7 +33,7 @@ def segment_tiff(
     ny, nx = seg_input.shape[:2]
     seg_eval, scale = _downsample_for_segmentation(
         seg_input,
-        max_size_px=max_segmentation_size_px,
+        binning=segmentation_binning,
     )
 
     channel_axis = -1 if seg_eval.ndim == 3 else None
@@ -116,7 +116,7 @@ def segment_tiff(
             "diameter": _none_or_float(diameter),
         },
         "segmentation_resize": {
-            "max_size_px": _none_or_int(max_segmentation_size_px),
+            "binning": _none_or_int(segmentation_binning),
             "scale": float(scale),
             "input_size_px": [int(seg_eval.shape[1]), int(seg_eval.shape[0])],
         },
@@ -276,24 +276,20 @@ def filter_masks_by_area(masks, *, min_area_px=None, max_area_px=None):
 _filter_masks_by_area = filter_masks_by_area
 
 
-def _downsample_for_segmentation(image, *, max_size_px=None):
-    max_size_px = _none_or_int(max_size_px)
-    if max_size_px is None:
+def _downsample_for_segmentation(image, *, binning=None):
+    binning = _none_or_int(binning)
+    if binning is None:
         return image, 1.0
-    if max_size_px <= 0:
-        raise ValueError("max_segmentation_size_px must be > 0.")
-
+    if binning <= 0:
+        raise ValueError("segmentation_binning must be > 0.")
+    if binning == 1:
+        return image, 1.0
     ny, nx = image.shape[:2]
-    max_dim = max(ny, nx)
-    if max_dim <= max_size_px:
-        return image, 1.0
-
-    scale = max_size_px / float(max_dim)
     out_shape = (
-        max(1, int(round(ny * scale))),
-        max(1, int(round(nx * scale))),
+        max(1, int(round(ny / float(binning)))),
+        max(1, int(round(nx / float(binning)))),
     )
-    return _resize_area(image, out_shape), scale
+    return _resize_area(image, out_shape), out_shape[0] / float(ny)
 
 
 def _resize_area(image, shape):

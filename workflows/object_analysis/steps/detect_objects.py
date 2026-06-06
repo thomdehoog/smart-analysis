@@ -42,11 +42,12 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         flow_threshold=seg_params["flow_threshold"],
         niter=seg_params["niter"],
         diameter=seg_params["diameter"],
-        max_segmentation_size_px=seg_params["max_segmentation_size_px"],
+        segmentation_binning=seg_params["segmentation_binning"],
         gpu=gpu,
         verbose=verbose,
         log_prefix="detect_objects",
     )
+    detection["area_filter"] = area_params
     raw_masks = detection.pop("raw_masks")
     detection["segmentation_params"] = seg_params
     detection["segmentation_params_hash"] = segmentation_params_hash(seg_params)

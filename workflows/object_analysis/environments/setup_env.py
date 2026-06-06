@@ -24,6 +24,8 @@ STEP_PROFILES = {
             "imagecodecs",
             "pooch",
             "cellpose",
+            "torchmetrics",
+            "termcolor",
         ],
         "diagnostics": [
             (

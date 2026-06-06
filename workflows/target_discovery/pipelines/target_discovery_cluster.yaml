@@ -18,7 +18,9 @@ target_discovery:
       auto_min_cluster_size: 2
       auto_max_tiny_cluster_fraction: 0.30
       random_state: 0
-      umap_min_dist: 0.1
+      umap_n_neighbors: 30
+      umap_min_dist: 0.4
+      umap_metric: "euclidean"   # euclidean (default) or cosine
       output_dir: null
 
   - select_targets:

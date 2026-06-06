@@ -41,7 +41,9 @@ def main():
     parser.add_argument("--auto-max-cluster-fraction", type=float, default=0.95)
     parser.add_argument("--auto-min-cluster-size", type=int, default=2)
     parser.add_argument("--auto-max-tiny-cluster-fraction", type=float, default=0.30)
-    parser.add_argument("--umap-min-dist", type=float, default=0.1)
+    parser.add_argument("--umap-n-neighbors", type=int, default=30)
+    parser.add_argument("--umap-min-dist", type=float, default=0.4)
+    parser.add_argument("--umap-metric", default="euclidean", choices=["cosine", "euclidean"])
     parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--feature", default="area")
     parser.add_argument("--direction", default="high", choices=["high", "low"])
@@ -76,7 +78,9 @@ def main():
             "auto_max_cluster_fraction": args.auto_max_cluster_fraction,
             "auto_min_cluster_size": args.auto_min_cluster_size,
             "auto_max_tiny_cluster_fraction": args.auto_max_tiny_cluster_fraction,
+            "umap_n_neighbors": args.umap_n_neighbors,
             "umap_min_dist": args.umap_min_dist,
+            "umap_metric": args.umap_metric,
             "random_state": args.random_state,
         })
 

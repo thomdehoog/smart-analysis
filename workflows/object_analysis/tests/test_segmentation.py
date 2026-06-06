@@ -133,6 +133,13 @@ class _PositionModel:
         return masks, None, None
 
 
+class _CornerPixelModel:
+    def eval(self, x, channel_axis=None, **kwargs):
+        masks = np.zeros(x.shape[:2], dtype=np.int32)
+        masks[0, 0] = 1
+        return masks, None, None
+
+
 class _AreaModel:
     def eval(self, x, channel_axis=None, **kwargs):
         masks = np.zeros(x.shape[:2], dtype=np.int32)
@@ -189,25 +196,40 @@ def test_segment_tiff_filters_masks_by_min_and_max_area(tmp_path):
     assert int((out["masks"] == 1).sum()) == 25
 
 
-def test_segment_tiff_downsamples_cellpose_input_without_upsampling(tmp_path):
+def test_segment_tiff_binning_downsamples_cellpose_input_without_upsampling(tmp_path):
     import tifffile
     from _segmentation import segment_tiff
 
     path = tmp_path / "large.tif"
     tifffile.imwrite(path, np.zeros((20, 40), dtype=np.uint8))
     model = _RecordingModel()
-    out = segment_tiff(path, {"model": model}, max_segmentation_size_px=10)
+    out = segment_tiff(path, {"model": model}, segmentation_binning=4)
 
     assert model.calls[0]["shape"] == (5, 10)
     assert model.calls[0]["input"].dtype == np.float32
     assert out["masks"].shape == (20, 40)
-    assert out["segmentation_resize"]["max_size_px"] == 10
+    assert out["segmentation_resize"]["binning"] == 4
     assert out["segmentation_resize"]["input_size_px"] == [10, 5]
     assert out["segmentation_resize"]["scale"] == 0.25
 
     model = _RecordingModel()
-    segment_tiff(path, {"model": model}, max_segmentation_size_px=100)
+    segment_tiff(path, {"model": model}, segmentation_binning=1)
     assert model.calls[0]["shape"] == (20, 40)
+
+
+def test_segment_tiff_uses_segmentation_binning(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "large.tif"
+    tifffile.imwrite(path, np.zeros((20, 40), dtype=np.uint8))
+    model = _RecordingModel()
+    out = segment_tiff(path, {"model": model}, segmentation_binning=4)
+
+    assert model.calls[0]["shape"] == (5, 10)
+    assert out["masks"].shape == (20, 40)
+    assert out["segmentation_resize"]["binning"] == 4
+    assert out["segmentation_resize"]["input_size_px"] == [10, 5]
 
 
 def test_segment_tiff_area_downsamples_intensity_image(tmp_path):
@@ -218,10 +240,26 @@ def test_segment_tiff_area_downsamples_intensity_image(tmp_path):
     image = np.arange(16, dtype=np.uint16).reshape(4, 4)
     tifffile.imwrite(path, image)
     model = _RecordingModel()
-    segment_tiff(path, {"model": model}, max_segmentation_size_px=2)
+    segment_tiff(path, {"model": model}, segmentation_binning=2)
 
     expected = np.array([[2.5, 4.5], [10.5, 12.5]], dtype=np.float32)
     np.testing.assert_allclose(model.calls[0]["input"], expected)
+
+
+def test_segment_tiff_binned_masks_are_not_smoothed(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "large.tif"
+    tifffile.imwrite(path, np.zeros((8, 8), dtype=np.uint8))
+    out = segment_tiff(
+        path,
+        {"model": _CornerPixelModel()},
+        segmentation_binning=4,
+    )
+
+    assert int((out["raw_masks"] == 1).sum()) == 16
+    assert "mask_smoothing_sigma_px" not in out["segmentation_resize"]
 
 
 def test_segment_tiff_upscaled_mask_position_is_original_space(tmp_path):
@@ -230,7 +268,7 @@ def test_segment_tiff_upscaled_mask_position_is_original_space(tmp_path):
 
     path = tmp_path / "large.tif"
     tifffile.imwrite(path, np.zeros((20, 40), dtype=np.uint8))
-    out = segment_tiff(path, {"model": _PositionModel()}, max_segmentation_size_px=10)
+    out = segment_tiff(path, {"model": _PositionModel()}, segmentation_binning=4)
 
     rows, cols = np.where(out["masks"] == 1)
     assert rows.min() == 8

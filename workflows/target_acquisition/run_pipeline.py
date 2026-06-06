@@ -1,8 +1,8 @@
 """CLI runner for the target_acquisition workflow.
 
-Run from an environment with the engine installed and with the
-SMART--target_acquisition--main conda environment available for the
-Cellpose segmentation worker.
+Run from an environment with the engine installed. On the microscope
+workstation the Cellpose segmentation worker uses the LAS X driver
+environment, ``lasxapi_extended``.
 
 Examples:
     python workflows/target_acquisition/run_pipeline.py

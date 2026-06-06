@@ -40,6 +40,11 @@ OPTIONAL_CROP_COLUMNS = (
     "crop_in_bounds",
     "object_complete",
     "object_fits_crop",
+    "crop_aligned_orientation",
+    "crop_rotation_deg",
+    "crop_orientation_deg",
+    "crop_eccentricity",
+    "crop_oriented_extent_px",
     "crop_path",
     "mask_path",
 )

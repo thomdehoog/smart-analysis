@@ -9,7 +9,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _contracts import validate_targets, validate_tile_detection  # noqa: E402
-from _detection_checkpoint import segmentation_params_hash  # noqa: E402
+from _detection_checkpoint import area_filter_params, segmentation_params_hash  # noqa: E402
+from _intensity_scale import compute_foreground_intensity_scale  # noqa: E402
 from _object_crops import extract_object_crops  # noqa: E402
 
 
@@ -42,6 +43,23 @@ def _load_target_discovery_step():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _mask_major_axis(mask):
+    rows, cols = np.nonzero(mask)
+    coords = np.column_stack([cols, rows]).astype(float)
+    coords -= coords.mean(axis=0)
+    cov = np.cov(coords.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    major_idx = int(np.argmax(eigvals))
+    angle = float(np.degrees(np.arctan2(
+        eigvecs[1, major_idx],
+        eigvecs[0, major_idx],
+    )) % 180.0)
+    major = float(eigvals[major_idx])
+    minor = float(eigvals[1 - major_idx])
+    eccentricity = float(np.sqrt(max(0.0, 1.0 - max(minor, 0.0) / major)))
+    return angle, eccentricity
 
 
 def _write_synthetic_tile(tmp_path):
@@ -219,11 +237,17 @@ def test_detection_checkpoint_hash_ignores_runtime_and_area_filter():
         "flow_threshold": 0.4,
         "niter": None,
         "diameter": None,
-        "max_segmentation_size_px": 512,
+        "segmentation_binning": None,
     }
 
     assert segmentation_params_hash(base | {"gpu": False, "min_area_px": 10}) == (
         segmentation_params_hash(base | {"gpu": True, "min_area_px": 2000})
+    )
+    assert segmentation_params_hash(base | {"segmentation_binning": 4}) != (
+        segmentation_params_hash(base | {"segmentation_binning": 2})
+    )
+    assert segmentation_params_hash(base | {"unused_legacy_key": 1.0}) == (
+        segmentation_params_hash(base | {"unused_legacy_key": None})
     )
 
 
@@ -253,6 +277,77 @@ def test_checkpoint_reentry_can_retune_area_filter_without_redetection(tmp_path)
     assert feature_data["detect_objects"]["n_raw_objects"] == 2
     assert feature_data["detect_objects"]["n_objects"] == 1
     assert feature_data["detect_objects"]["dropped_labels"] == [1]
+
+
+def test_checkpoint_reentry_defaults_to_stored_area_filter(tmp_path):
+    detection_dir = tmp_path / "object_detection"
+    image_path = _write_synthetic_tile(tmp_path)
+    pipeline_data = {
+        "input": _payload(
+            image_path,
+            output_dir=str(detection_dir),
+            min_area_px=80,
+        ),
+        "metadata": {"verbose": 0},
+    }
+    detection_data = detect_objects.run(pipeline_data, {"model": _StubCellposeModel()})
+    detection = detection_data["detect_objects"]
+
+    feature_data = {
+        "input": {
+            "detection_checkpoint_path": detection["artifacts"]["detection_checkpoint_json"],
+            "segmentation_params_hash": detection["segmentation_params_hash"],
+        },
+        "metadata": {"verbose": 0},
+    }
+    feature_data = load_detected_objects.run(feature_data, {})
+
+    assert feature_data["detect_objects"]["n_raw_objects"] == 2
+    assert feature_data["detect_objects"]["n_objects"] == 1
+    assert feature_data["detect_objects"]["area_filter"]["min_area_px"] == 80
+    assert feature_data["detect_objects"]["dropped_labels"] == [1]
+
+
+def test_checkpoint_reentry_can_retune_equivalent_diameter_filter(tmp_path):
+    detection_dir = tmp_path / "object_detection"
+    image_path = _write_synthetic_tile(tmp_path)
+    pipeline_data = {
+        "input": _payload(
+            image_path,
+            output_dir=str(detection_dir),
+        ),
+        "metadata": {"verbose": 0},
+    }
+    detection_data = detect_objects.run(pipeline_data, {"model": _StubCellposeModel()})
+    detection = detection_data["detect_objects"]
+
+    # With source_pixel_size_um=[2, 3], a 20 um equivalent-diameter floor
+    # converts to ceil(pi * 10^2 / 6) = 53 px. The 36 px object drops; the
+    # 100 px object remains.
+    feature_data = {
+        "input": {
+            "detection_checkpoint_path": detection["artifacts"]["detection_checkpoint_json"],
+            "segmentation_params_hash": detection["segmentation_params_hash"],
+            "min_equivalent_diameter_um": 20.0,
+        },
+        "metadata": {"verbose": 0},
+    }
+    feature_data = load_detected_objects.run(feature_data, {})
+
+    area_filter = feature_data["detect_objects"]["area_filter"]
+    assert area_filter["min_area_px"] == 53
+    assert area_filter["min_equivalent_diameter_um"] == 20.0
+    assert feature_data["detect_objects"]["n_raw_objects"] == 2
+    assert feature_data["detect_objects"]["n_objects"] == 1
+    assert feature_data["detect_objects"]["dropped_labels"] == [1]
+
+
+def test_area_filter_rejects_ambiguous_pixel_and_diameter_thresholds():
+    with pytest.raises(ValueError, match="not both"):
+        area_filter_params(
+            {"source_pixel_size_um": [0.5, 0.5]},
+            {"min_area_px": 10, "min_equivalent_diameter_um": 5.0},
+        )
 
 
 def test_detection_checkpoint_hash_mismatch_rejects_stale_masks(tmp_path):
@@ -374,7 +469,7 @@ def test_split_detection_features_engine_path_with_mock_backend(tmp_path, monkey
                     "flow_threshold": 0.4,
                     "niter": None,
                     "diameter": None,
-                    "max_segmentation_size_px": None,
+                    "segmentation_binning": 1,
                     "min_area_px": 80,
                     "max_area_px": None,
                     "persist_only": True,
@@ -470,11 +565,96 @@ def test_fixed_crop_size_is_used_for_every_object(tmp_path):
         "crop_size_px": 24,
         "mask": False,
         "drop_incomplete": True,
+        "align_orientation": False,
+        "min_eccentricity_to_align": 0.4,
+        "orientation_target_deg": 45.0,
     }
     assert crops["skipped_incomplete_labels"] == [1]
     assert [obj["label"] for obj in crops["objects"]] == [2]
     assert [obj["crop_height_px"] for obj in crops["objects"]] == [24]
     assert [obj["crop_width_px"] for obj in crops["objects"]] == [24]
+    assert crops["objects"][0]["crop_aligned_orientation"] is False
+    assert crops["objects"][0]["crop_rotation_deg"] == 0.0
+
+
+def test_aligned_crop_rotates_elongated_object_to_diagonal():
+    image = np.ones((80, 80), dtype=np.uint8)
+    masks = np.zeros((80, 80), dtype=np.int32)
+    masks[38:42, 20:60] = 1
+
+    crops = extract_object_crops(
+        image=image,
+        masks=masks,
+        tile_id=["R0", 0, 0],
+        crop_size_px=48,
+        mask=True,
+        align_orientation=True,
+        min_eccentricity_to_align=0.0,
+    )
+
+    assert crops["skipped_incomplete_labels"] == []
+    obj = crops["objects"][0]
+    angle, eccentricity = _mask_major_axis(obj["crop_mask"])
+    assert obj["crop_aligned_orientation"] is True
+    assert obj["crop_eccentricity"] > 0.8
+    assert obj["crop_oriented_extent_px"] < 48
+    assert eccentricity > 0.8
+    assert angle == pytest.approx(45.0, abs=3.0)
+    assert np.all(obj["crop_image"][obj["crop_mask"] == 0] == 0)
+
+
+def test_orientation_alignment_does_not_change_crop_acceptance():
+    image = np.ones((96, 96), dtype=np.uint8)
+    masks = np.zeros((96, 96), dtype=np.int32)
+    masks[46:50, 18:78] = 1
+
+    unaligned = extract_object_crops(
+        image=image,
+        masks=masks,
+        tile_id=["R0", 0, 0],
+        crop_size_px=48,
+        mask=True,
+        align_orientation=False,
+        drop_incomplete=True,
+    )
+    aligned = extract_object_crops(
+        image=image,
+        masks=masks,
+        tile_id=["R0", 0, 0],
+        crop_size_px=48,
+        mask=True,
+        align_orientation=True,
+        min_eccentricity_to_align=0.0,
+        drop_incomplete=True,
+    )
+
+    assert unaligned["objects"] == []
+    assert unaligned["skipped_incomplete_labels"] == [1]
+    assert aligned["objects"] == []
+    assert aligned["skipped_incomplete_labels"] == [1]
+
+
+def test_round_crop_is_not_orientation_aligned():
+    image = np.ones((64, 64), dtype=np.uint8)
+    masks = np.zeros((64, 64), dtype=np.int32)
+    rr, cc = np.ogrid[:64, :64]
+    masks[(rr - 32) ** 2 + (cc - 32) ** 2 <= 8 ** 2] = 1
+
+    crops = extract_object_crops(
+        image=image,
+        masks=masks,
+        tile_id=["R0", 0, 0],
+        crop_size_px=32,
+        mask=True,
+        align_orientation=True,
+        min_eccentricity_to_align=0.4,
+    )
+
+    obj = crops["objects"][0]
+    assert obj["crop_aligned_orientation"] is False
+    assert obj["crop_rotation_deg"] == 0.0
+    assert obj["crop_eccentricity"] < 0.4
+    assert obj["crop_oriented_extent_px"] is not None
 
 
 def test_masked_crop_keeps_padded_context_when_object_is_complete():
@@ -611,7 +791,70 @@ def test_deep_crop_geometry_comes_from_step_params(tmp_path):
         "crop_size_px": 28,
         "mask": False,
         "drop_incomplete": True,
+        "align_orientation": False,
+        "min_eccentricity_to_align": 0.4,
+        "orientation_target_deg": 45.0,
     }
+
+
+def test_deep_step_publishes_orientation_alignment_columns(tmp_path):
+    import tifffile
+
+    image_path = tmp_path / "elongated.ome.tiff"
+    image = np.ones((96, 96), dtype=np.uint8)
+    masks = np.zeros((96, 96), dtype=np.int32)
+    masks[46:50, 28:68] = 1
+    tifffile.imwrite(image_path, image)
+    pipeline_data = {
+        "input": _payload(
+            image_path,
+            backend="mock",
+            embedding_dim=6,
+            source_image_size_px=[96, 96],
+        ),
+        "metadata": {"verbose": 0},
+        "detect_objects": {
+            "image_2d": image,
+            "image": image,
+            "masks": masks,
+            "image_size_px": [96, 96],
+        },
+        "extract_features": {
+            "properties": {
+                "label": [1],
+                "centroid-0": [47.5],
+                "centroid-1": [47.5],
+                "bbox-0": [46],
+                "bbox-1": [28],
+                "bbox-2": [50],
+                "bbox-3": [68],
+                "area": [160],
+                "intensity_mean": [1.0],
+                "eccentricity": [0.99],
+            }
+        },
+    }
+
+    pipeline_data = extract_deep_features.run(
+        pipeline_data,
+        {},
+        backend="mock",
+        embedding_dim=6,
+        crop_size_px=48,
+        mask=True,
+        align_orientation=True,
+        min_eccentricity_to_align=0.0,
+    )
+    result = build_object_table.run(pipeline_data, {})["object_analysis"]
+    props = result["objects"]["properties"]
+
+    assert props["label"] == [1]
+    assert props["crop_aligned_orientation"] == [True]
+    assert props["object_fits_crop"] == [True]
+    assert props["crop_rotation_deg"][0] == pytest.approx(-45.0, abs=1.0)
+    assert props["crop_eccentricity"][0] > 0.8
+    assert props["crop_oriented_extent_px"][0] < 48
+    assert result["objects"]["embeddings"]["crop_policy"]["align_orientation"] is True
 
 
 def test_mock_deep_features_merge_into_object_table(tmp_path):
@@ -736,6 +979,63 @@ def test_dino_raw_integer_conversion_preserves_relative_brightness():
     assert scaled[1, 1, 2] == pytest.approx(200 / 255)
 
 
+def test_dino_shared_intensity_scale_preserves_relative_brightness():
+    image = np.asarray(
+        [
+            [[100, 200, 300], [500, 600, 700]],
+            [[900, 1000, 1100], [1300, 1400, 1500]],
+        ],
+        dtype=np.uint16,
+    )
+    scale = {
+        "mode": "foreground_run",
+        "foreground": True,
+        "lo": [100, 200, 300],
+        "hi": [1100, 1200, 1300],
+    }
+
+    scaled = extract_deep_features._raw_image_to_float01(
+        image,
+        intensity_scale=scale,
+    )
+
+    assert scaled[0, 0, 0] == pytest.approx(0.0)
+    assert scaled[0, 0, 1] == pytest.approx(0.0)
+    assert scaled[0, 0, 2] == pytest.approx(0.0)
+    assert scaled[0, 1, 0] == pytest.approx(0.4)
+    assert scaled[0, 1, 1] == pytest.approx(0.4)
+    assert scaled[0, 1, 2] == pytest.approx(0.4)
+    assert scaled[1, 1, 0] == pytest.approx(1.0)
+    assert scaled[1, 1, 1] == pytest.approx(1.0)
+    assert scaled[1, 1, 2] == pytest.approx(1.0)
+
+
+def test_foreground_intensity_scale_uses_accepted_object_pixels_only():
+    image = np.zeros((4, 4, 3), dtype=np.uint16)
+    masks = np.zeros((4, 4), dtype=np.int32)
+
+    masks[0, 0] = 1
+    image[0, 0] = [1, 2, 3]
+
+    masks[1:3, 1:3] = 2
+    image[1, 1] = [100, 200, 300]
+    image[1, 2] = [150, 250, 350]
+    image[2, 1] = [200, 300, 400]
+    image[2, 2] = [250, 350, 450]
+
+    field = {"image": image, "tile_id": ("T", 0), "pixel_um": 1.0}
+    scale = compute_foreground_intensity_scale(
+        [field],
+        masks_by_tile={("T", 0): masks},
+        min_area_px=2,
+        percentiles=(0, 100),
+    )
+
+    assert scale["foreground"] is True
+    assert scale["lo"] == [100.0, 200.0, 300.0]
+    assert scale["hi"] == [250.0, 350.0, 450.0]
+
+
 def test_dino_float_crops_must_be_preprocessed_to_unit_range():
     image = np.full((4, 5, 3), 2.0, dtype=np.float32)
 
@@ -747,6 +1047,220 @@ def test_dino_rgb_conversion_rejects_non_crop_shapes():
     channel_first = np.zeros((2, 6, 7), dtype=np.uint8)
     with pytest.raises(ValueError, match="2D crop"):
         extract_deep_features._as_rgb(channel_first)
+
+
+def test_dino_input_size_validation_uses_backend_patch_size():
+    extract_deep_features._validate_input_size_px(518, backend="dinov2")
+    extract_deep_features._validate_input_size_px(512, backend="dinov3")
+
+    with pytest.raises(ValueError, match="multiple.*14"):
+        extract_deep_features._validate_input_size_px(512, backend="dinov2")
+    with pytest.raises(ValueError, match="multiple.*16"):
+        extract_deep_features._validate_input_size_px(518, backend="dinov3")
+
+
+def test_dinov2_local_weight_cache_bridges_v2_folder(tmp_path):
+    source_dir = tmp_path / "v2"
+    source_dir.mkdir()
+    source = source_dir / "dinov2_vitb14_pretrain.pth"
+    source.write_bytes(b"weights")
+
+    target = extract_deep_features._prepare_dinov2_local_checkpoint(
+        "dinov2_vitb14",
+        tmp_path,
+    )
+
+    assert target == tmp_path / "dinov2" / "torch_hub" / "checkpoints" / source.name
+    assert target.exists()
+    assert target.read_bytes() == b"weights"
+
+
+def test_dinov3_local_weight_resolution_supports_cache_layout(tmp_path):
+    weights_dir = tmp_path / "v3"
+    weights_dir.mkdir()
+    weights = weights_dir / "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
+    weights.write_bytes(b"weights")
+    (weights_dir / "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth.part").write_bytes(b"partial")
+
+    resolved = extract_deep_features._resolve_dinov3_weights("dinov3_vitb16", tmp_path)
+
+    assert resolved == weights
+
+
+def test_dinov3_local_weights_bypass_hub_url_loader(tmp_path, monkeypatch):
+    weights = tmp_path / "dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+    weights.write_bytes(b"weights")
+    calls = {}
+
+    class _Model:
+        def load_state_dict(self, state_dict, *, strict):
+            calls["state_dict"] = state_dict
+            calls["strict"] = strict
+
+    class _Hub:
+        def load(self, repo, model_name, **kwargs):
+            calls["hub"] = (repo, model_name, kwargs)
+            return _Model()
+
+    class _Torch:
+        hub = _Hub()
+
+    monkeypatch.setattr(
+        extract_deep_features,
+        "_load_torch_state_dict",
+        lambda torch, path: {"weight": "loaded"},
+    )
+
+    model = extract_deep_features._load_dinov3_torch_hub_model(
+        _Torch,
+        "dinov3_vits16",
+        weights,
+    )
+
+    assert isinstance(model, _Model)
+    assert calls["hub"] == (
+        "facebookresearch/dinov3",
+        "dinov3_vits16",
+        {"pretrained": False},
+    )
+    assert calls["state_dict"] == {"weight": "loaded"}
+    assert calls["strict"] is True
+
+
+def test_torch_state_dict_loader_unwraps_nested_module_prefix(tmp_path):
+    weights = tmp_path / "weights.pth"
+
+    class _Torch:
+        @staticmethod
+        def load(path, **kwargs):
+            assert path == str(weights)
+            assert kwargs["map_location"] == "cpu"
+            assert kwargs["weights_only"] is True
+            return {
+                "state_dict": {
+                    "module.cls_token": "a",
+                    "module.patch_embed.proj.weight": "b",
+                }
+            }
+
+    state = extract_deep_features._load_torch_state_dict(_Torch, weights)
+
+    assert state == {
+        "cls_token": "a",
+        "patch_embed.proj.weight": "b",
+    }
+
+
+def test_dinov3_huggingface_name_maps_to_hub_name():
+    assert (
+        extract_deep_features._dinov3_hub_name("facebook/dinov3-vitb16-pretrain-lvd1689m")
+        == "dinov3_vitb16"
+    )
+
+
+def test_forward_dinov3_prefers_pooler_output():
+    pooled = np.asarray([[1.0, 2.0, 3.0]])
+
+    class _Output:
+        pooler_output = pooled
+
+    class _Model:
+        def __call__(self, pixel_values):
+            return _Output()
+
+    out = extract_deep_features._forward_dinov3(_Model(), batch="unused", torch=None)
+
+    assert out is pooled
+
+
+def test_forward_dinov3_falls_back_to_cls_token():
+    hidden = np.arange(2 * 5 * 3, dtype=float).reshape(2, 5, 3)
+
+    class _Output:
+        pooler_output = None
+        last_hidden_state = hidden
+
+    class _Model:
+        def __call__(self, pixel_values):
+            return _Output()
+
+    out = extract_deep_features._forward_dinov3(_Model(), batch="unused", torch=None)
+
+    np.testing.assert_array_equal(out, hidden[:, 0, :])
+
+
+def test_extract_deep_features_accepts_dinov3_backend(monkeypatch):
+    image = np.zeros((24, 24, 3), dtype=np.uint8)
+    image[8:16, 8:16] = 180
+    masks = np.zeros((24, 24), dtype=np.int32)
+    masks[8:16, 8:16] = 1
+    input_intensity_scale = {
+        "mode": "foreground_run",
+        "foreground": True,
+        "lo": [10, 20, 30],
+        "hi": [100, 200, 300],
+    }
+
+    def _fake_dinov3(
+        objects,
+        state,
+        *,
+        model_name,
+        input_size_px,
+        batch_size,
+        device,
+        model_cache_dir,
+        input_intensity_scale,
+    ):
+        assert len(objects) == 1
+        assert model_name == "dinov3_vits16"
+        assert input_size_px == 512
+        assert batch_size == 4
+        assert device is None
+        assert model_cache_dir == "Z:/cache/DINO"
+        assert input_intensity_scale["mode"] == "foreground_run"
+        assert input_intensity_scale["lo"].tolist() == [10.0, 20.0, 30.0]
+        assert input_intensity_scale["hi"].tolist() == [100.0, 200.0, 300.0]
+        return [[1.0, 0.0, 0.0]]
+
+    monkeypatch.setattr(extract_deep_features, "_dinov3_embeddings", _fake_dinov3)
+    pipeline_data = {
+        "input": {"tile_id": ["T", 0, 0]},
+        "metadata": {"verbose": 0},
+        "detect_objects": {
+            "image": image,
+            "image_2d": image[..., 0],
+            "masks": masks,
+        },
+    }
+
+    out = extract_deep_features.run(
+        pipeline_data,
+        {},
+        backend="dinov3",
+        model_name="dinov3_vits16",
+        model_cache_dir="Z:/cache/DINO",
+        input_size_px=512,
+        input_intensity_scale=input_intensity_scale,
+        batch_size=4,
+        crop_size_px=12,
+        drop_incomplete_crops=True,
+    )
+
+    embeddings = out["extract_deep_features"]["embeddings"]
+    assert embeddings["backend"] == "dinov3"
+    assert embeddings["model"] == "dinov3_vits16"
+    assert embeddings["input_size_px"] == 512
+    assert embeddings["batch_size"] == 4
+    assert embeddings["patch_size_px"] == 16
+    assert embeddings["model_cache_dir"] == "Z:/cache/DINO"
+    assert embeddings["input_intensity_scale"] == {
+        "mode": "foreground_run",
+        "foreground": True,
+        "lo": [10.0, 20.0, 30.0],
+        "hi": [100.0, 200.0, 300.0],
+    }
+    assert embeddings["vectors"] == [[1.0, 0.0, 0.0]]
 
 
 def test_yaml_registers_classical_and_deep():

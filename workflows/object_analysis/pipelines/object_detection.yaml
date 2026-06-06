@@ -13,8 +13,10 @@ object_detection:
       flow_threshold: 0.4
       niter: null
       diameter: null
-      max_segmentation_size_px: 512
-      min_area_px: 1000
+      segmentation_binning: 1
+      min_area_px: null
       max_area_px: null
+      min_equivalent_diameter_um: null
+      max_equivalent_diameter_um: null
       gpu: true
       persist_only: true

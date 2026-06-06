@@ -21,6 +21,8 @@ def test_cluster_pipeline_writes_table_plot_and_preserves_positions(tmp_path):
         "tiles": overview["tiles"],
         "output_dir": str(output_dir),
         "n_neighbors": 2,
+        "umap_n_neighbors": 4,
+        "umap_min_dist": 0.4,
         "leiden_resolution": 1.0,
         "random_state": 7,
         "feature": "area",
@@ -39,6 +41,11 @@ def test_cluster_pipeline_writes_table_plot_and_preserves_positions(tmp_path):
 
     assert clusters["n_objects"] == 6
     assert clusters["n_clusters"] >= 1
+    assert clusters["n_neighbors"] == 2
+    assert clusters["effective_n_neighbors"] == 2
+    assert clusters["umap_n_neighbors"] == 4
+    assert clusters["effective_umap_n_neighbors"] == 4
+    assert clusters["umap_min_dist"] == 0.4
     assert len(clusters["table"]) == 6
     assert [row["object_id"] for row in clusters["table"]] == [
         "R0_r000_c000_obj00001",
@@ -86,6 +93,7 @@ def test_cluster_pipeline_auto_resolution_reports_sweep(tmp_path):
         "output_dir": str(output_dir),
         "cluster_mode": "auto",
         "n_neighbors": 2,
+        "umap_n_neighbors": 5,
         "leiden_resolution": 1.0,
         "auto_resolution_grid": [0.05, 0.2, 0.7, 1.5, 3.0],
         "auto_refine_steps": 1,
@@ -109,6 +117,8 @@ def test_cluster_pipeline_auto_resolution_reports_sweep(tmp_path):
     selected = [row for row in sweep if row["selected"]]
 
     assert clusters["cluster_mode"] == "auto"
+    assert clusters["n_neighbors"] == 2
+    assert clusters["umap_n_neighbors"] == 5
     assert clusters["leiden_resolution"] in {row["resolution"] for row in sweep}
     assert len(sweep) >= len(payload["auto_resolution_grid"])
     assert len(selected) == 1

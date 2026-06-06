@@ -28,7 +28,9 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     n_neighbors = int(_setting(inp, params, "n_neighbors", 15))
     resolution = float(_setting(inp, params, "leiden_resolution", 1.0))
     random_state = int(_setting(inp, params, "random_state", 0))
-    min_dist = float(_setting(inp, params, "umap_min_dist", 0.1))
+    umap_n_neighbors = int(_setting(inp, params, "umap_n_neighbors", 30))
+    min_dist = float(_setting(inp, params, "umap_min_dist", 0.4))
+    umap_metric = _resolve_umap_metric(_setting(inp, params, "umap_metric", "euclidean"))
     cluster_mode = str(_setting(inp, params, "cluster_mode", "manual")).lower()
 
     rows, vectors = _collect_embedding_rows(overview["tiles"])
@@ -60,12 +62,14 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     elif cluster_mode != "manual":
         raise ValueError("cluster_mode must be 'manual' or 'auto'.")
 
-    cluster_ids, umap_xy = _cluster_vectors(
+    cluster_ids, umap_xy, effective_n_neighbors, effective_umap_n_neighbors = _cluster_vectors(
         vectors,
         n_neighbors=n_neighbors,
+        umap_n_neighbors=umap_n_neighbors,
         resolution=selected_resolution,
         random_state=random_state,
         min_dist=min_dist,
+        umap_metric=umap_metric,
     )
 
     for idx, row in enumerate(rows):
@@ -82,6 +86,11 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         "method": "cosine_knn_leiden_umap",
         "cluster_mode": cluster_mode,
         "n_neighbors": n_neighbors,
+        "effective_n_neighbors": effective_n_neighbors,
+        "umap_n_neighbors": umap_n_neighbors,
+        "effective_umap_n_neighbors": effective_umap_n_neighbors,
+        "umap_min_dist": min_dist,
+        "umap_metric": umap_metric,
         "leiden_resolution": selected_resolution,
         "requested_leiden_resolution": resolution,
         "random_state": random_state,
@@ -148,17 +157,19 @@ def _cluster_vectors(
     vectors: list[list[float]],
     *,
     n_neighbors: int,
+    umap_n_neighbors: int,
     resolution: float,
     random_state: int,
     min_dist: float,
-) -> tuple[list[int], list[list[float]]]:
+    umap_metric: str = "euclidean",
+) -> tuple[list[int], list[list[float]], int, int]:
     n_objects = len(vectors)
     if n_objects == 0:
-        return [], []
+        return [], [], 0, 0
     if n_objects == 1:
-        return [0], [[0.0, 0.0]]
+        return [0], [[0.0, 0.0]], 0, 0
     if n_objects == 2:
-        return [0, 0], [[0.0, 0.0], [1.0, 0.0]]
+        return [0, 0], [[0.0, 0.0], [1.0, 0.0]], 1, 1
 
     import numpy as np
     import umap
@@ -166,15 +177,32 @@ def _cluster_vectors(
     x = np.asarray(vectors, dtype=float)
     graph, k = _build_knn_graph(x, n_neighbors)
     cluster_ids = _leiden_labels(graph, resolution, random_state)
+    umap_k = _effective_umap_neighbors(umap_n_neighbors, n_objects)
 
     reducer = umap.UMAP(
-        n_neighbors=k,
+        n_neighbors=umap_k,
         min_dist=min_dist,
-        metric="cosine",
+        metric=umap_metric,
         random_state=random_state,
     )
     umap_xy = reducer.fit_transform(x).astype(float).tolist()
-    return cluster_ids, umap_xy
+    return cluster_ids, umap_xy, k, umap_k
+
+
+def _effective_umap_neighbors(n_neighbors: int, n_objects: int) -> int:
+    """Clamp UMAP's layout neighborhood independently of the clustering graph."""
+    if n_objects <= 2:
+        return max(0, n_objects - 1)
+    return max(2, min(int(n_neighbors), n_objects - 1))
+
+
+def _resolve_umap_metric(metric) -> str:
+    """Allow cosine (default) or euclidean for the UMAP layout metric."""
+    metric = str(metric).lower()
+    allowed = ("cosine", "euclidean")
+    if metric not in allowed:
+        raise ValueError(f"umap_metric must be one of {allowed}; got {metric!r}.")
+    return metric
 
 
 def _build_knn_graph(x, n_neighbors: int):
