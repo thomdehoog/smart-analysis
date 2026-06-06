@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -112,9 +113,32 @@ class _RecordingModel:
         self.calls = []
 
     def eval(self, x, channel_axis=None, **kwargs):
-        self.calls.append({"channel_axis": channel_axis, "kwargs": kwargs})
+        self.calls.append(
+            {
+                "input": np.asarray(x).copy(),
+                "shape": x.shape,
+                "channel_axis": channel_axis,
+                "kwargs": kwargs,
+            }
+        )
         masks = np.zeros(x.shape[:2], dtype=np.int32)
         masks[1:3, 1:3] = 1
+        return masks, None, None
+
+
+class _PositionModel:
+    def eval(self, x, channel_axis=None, **kwargs):
+        masks = np.zeros(x.shape[:2], dtype=np.int32)
+        masks[2, 3] = 1
+        return masks, None, None
+
+
+class _AreaModel:
+    def eval(self, x, channel_axis=None, **kwargs):
+        masks = np.zeros(x.shape[:2], dtype=np.int32)
+        masks[1:3, 1:3] = 1
+        masks[4:9, 4:9] = 2
+        masks[10:20, 10:20] = 3
         return masks, None, None
 
 
@@ -142,3 +166,232 @@ def test_segment_tiff_no_channel_axis_for_2d(tmp_path):
     segment_tiff(path, {"model": model})
 
     assert model.calls[0]["channel_axis"] is None
+
+
+def test_segment_tiff_filters_masks_by_min_and_max_area(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "gray.tif"
+    tifffile.imwrite(path, np.zeros((24, 24), dtype=np.uint8))
+    out = segment_tiff(
+        path,
+        {"model": _AreaModel()},
+        min_area_px=10,
+        max_area_px=50,
+    )
+
+    assert out["n_raw_objects"] == 3
+    assert out["n_objects"] == 1
+    assert out["dropped_labels"] == [1, 3]
+    assert out["area_filter"] == {"min_area_px": 10, "max_area_px": 50}
+    assert np.unique(out["masks"]).tolist() == [0, 1]
+    assert int((out["masks"] == 1).sum()) == 25
+
+
+def test_segment_tiff_downsamples_cellpose_input_without_upsampling(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "large.tif"
+    tifffile.imwrite(path, np.zeros((20, 40), dtype=np.uint8))
+    model = _RecordingModel()
+    out = segment_tiff(path, {"model": model}, max_segmentation_size_px=10)
+
+    assert model.calls[0]["shape"] == (5, 10)
+    assert model.calls[0]["input"].dtype == np.float32
+    assert out["masks"].shape == (20, 40)
+    assert out["segmentation_resize"]["max_size_px"] == 10
+    assert out["segmentation_resize"]["input_size_px"] == [10, 5]
+    assert out["segmentation_resize"]["scale"] == 0.25
+
+    model = _RecordingModel()
+    segment_tiff(path, {"model": model}, max_segmentation_size_px=100)
+    assert model.calls[0]["shape"] == (20, 40)
+
+
+def test_segment_tiff_area_downsamples_intensity_image(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "small.tif"
+    image = np.arange(16, dtype=np.uint16).reshape(4, 4)
+    tifffile.imwrite(path, image)
+    model = _RecordingModel()
+    segment_tiff(path, {"model": model}, max_segmentation_size_px=2)
+
+    expected = np.array([[2.5, 4.5], [10.5, 12.5]], dtype=np.float32)
+    np.testing.assert_allclose(model.calls[0]["input"], expected)
+
+
+def test_segment_tiff_upscaled_mask_position_is_original_space(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "large.tif"
+    tifffile.imwrite(path, np.zeros((20, 40), dtype=np.uint8))
+    out = segment_tiff(path, {"model": _PositionModel()}, max_segmentation_size_px=10)
+
+    rows, cols = np.where(out["masks"] == 1)
+    assert rows.min() == 8
+    assert rows.max() == 11
+    assert cols.min() == 12
+    assert cols.max() == 15
+
+
+def test_segment_tiff_passes_cellpose_tuning_params(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "gray.tif"
+    tifffile.imwrite(path, np.zeros((24, 24), dtype=np.uint8))
+    model = _RecordingModel()
+    out = segment_tiff(
+        path,
+        {"model": model},
+        cellprob_threshold=-1.0,
+        flow_threshold=0.7,
+        niter=2000,
+        diameter=90,
+        gpu=False,
+    )
+
+    assert model.calls[0]["kwargs"] == {
+        "cellprob_threshold": -1.0,
+        "flow_threshold": 0.7,
+        "niter": 2000,
+        "diameter": 90.0,
+    }
+    assert out["cellpose_params"] == {
+        "requested_gpu": False,
+        "used_gpu": False,
+        "device": "cpu",
+        "cellprob_threshold": -1.0,
+        "flow_threshold": 0.7,
+        "niter": 2000,
+        "diameter": 90.0,
+    }
+
+
+def test_segment_tiff_prefers_gpu_and_falls_back_to_cpu(tmp_path, monkeypatch):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "gray.tif"
+    tifffile.imwrite(path, np.zeros((8, 8), dtype=np.uint8))
+    calls = []
+
+    class _FakeDevice:
+        def __init__(self, name):
+            self.type = name
+            self.name = name
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+    class _FakeMps:
+        @staticmethod
+        def is_available():
+            return False
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+        backends = types.SimpleNamespace(mps=_FakeMps())
+
+        @staticmethod
+        def device(name):
+            return _FakeDevice(name)
+
+    class _FakeCellposeModel:
+        def __init__(self, gpu=False, device=None):
+            device_name = getattr(device, "type", "cpu")
+            calls.append((bool(gpu), device_name))
+            if device_name == "cuda":
+                raise RuntimeError("no cuda for test")
+            self.device_name = device_name
+
+        def eval(self, x, channel_axis=None, **kwargs):
+            masks = np.zeros(x.shape[:2], dtype=np.int32)
+            masks[1:4, 1:4] = 1
+            return masks, None, None
+
+    fake_models = types.SimpleNamespace(CellposeModel=_FakeCellposeModel)
+    monkeypatch.setitem(sys.modules, "torch", _FakeTorch)
+    monkeypatch.setitem(sys.modules, "cellpose", types.SimpleNamespace(models=fake_models))
+
+    out = segment_tiff(path, {}, gpu=True)
+
+    assert calls == [(True, "cuda"), (False, "cpu")]
+    assert out["cellpose_params"]["requested_gpu"] is True
+    assert out["cellpose_params"]["used_gpu"] is False
+    assert out["cellpose_params"]["device"] == "cpu"
+
+
+def test_segment_tiff_uses_mps_when_cuda_is_unavailable(tmp_path, monkeypatch):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "gray.tif"
+    tifffile.imwrite(path, np.zeros((8, 8), dtype=np.uint8))
+    calls = []
+
+    class _FakeDevice:
+        def __init__(self, name):
+            self.type = name
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    class _FakeMps:
+        @staticmethod
+        def is_available():
+            return True
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+        backends = types.SimpleNamespace(mps=_FakeMps())
+
+        @staticmethod
+        def device(name):
+            return _FakeDevice(name)
+
+    class _FakeCellposeModel:
+        def __init__(self, gpu=False, device=None):
+            device_name = getattr(device, "type", "cpu")
+            calls.append((bool(gpu), device_name))
+            self.device_name = device_name
+
+        def eval(self, x, channel_axis=None, **kwargs):
+            masks = np.zeros(x.shape[:2], dtype=np.int32)
+            masks[1:4, 1:4] = 1
+            return masks, None, None
+
+    fake_models = types.SimpleNamespace(CellposeModel=_FakeCellposeModel)
+    monkeypatch.setitem(sys.modules, "torch", _FakeTorch)
+    monkeypatch.setitem(sys.modules, "cellpose", types.SimpleNamespace(models=fake_models))
+
+    out = segment_tiff(path, {}, gpu=True)
+
+    assert calls == [(True, "mps")]
+    assert out["cellpose_params"]["requested_gpu"] is True
+    assert out["cellpose_params"]["used_gpu"] is True
+    assert out["cellpose_params"]["device"] == "mps"
+
+
+def test_segment_tiff_rejects_invalid_area_filter(tmp_path):
+    import tifffile
+    from _segmentation import segment_tiff
+
+    path = tmp_path / "gray.tif"
+    tifffile.imwrite(path, np.zeros((24, 24), dtype=np.uint8))
+    with pytest.raises(ValueError, match="max_area_px"):
+        segment_tiff(
+            path,
+            {"model": _AreaModel()},
+            min_area_px=100,
+            max_area_px=10,
+        )

@@ -82,6 +82,12 @@ Responsibilities:
 - read the tile image
 - select the segmentation channel or input plane
 - run Cellpose
+- apply workflow-configured object-size bounds (`min_area_px`,
+  `max_area_px`) to remove detections outside the intended object scale
+- optionally downsample large tiles for Cellpose (`max_segmentation_size_px`)
+  and scale masks back to the original image space before features/crops
+- expose Cellpose-SAM tuning knobs (`cellprob_threshold`, `flow_threshold`,
+  `niter`, `diameter`) as workflow parameters
 - produce masks and object localization inputs
 - keep the Cellpose model warm in step state
 
@@ -160,10 +166,12 @@ Crop policy for the first deep-feature pass:
 - fixed `crop_size_px`, declared once in the workflow YAML
 - keep crop size out of per-tile input so it cannot drift during a run
 - zero-pad at image boundaries
-- drop objects whose full fixed crop would require padding
-- support `mask: false` / `mask: true`:
-  - `false`: keep context pixels around the object
-  - `true`: zero non-object pixels while still writing the object mask
+- drop objects whose mask touches the image boundary or whose bbox does not
+  fit inside the fixed crop
+- default to `mask: true` so deep crops contain the segmented object only
+- keep `mask: false` available for explicit context-preserving runs
+- masked crops may pad outside-tile context with black; unmasked context
+  crops still require the full crop window to stay inside the tile
 - do not perform adaptive intensity normalization in the DINO step;
   integer crops are converted by dtype range, and any real intensity
   normalization belongs in upstream preprocessing

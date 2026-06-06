@@ -11,7 +11,14 @@ def segment_tiff(
     state: dict,
     *,
     channels=None,
-    gpu: bool = False,
+    min_area_px=None,
+    max_area_px=None,
+    cellprob_threshold=None,
+    flow_threshold=None,
+    niter=None,
+    diameter=None,
+    max_segmentation_size_px=None,
+    gpu: bool = True,
     verbose: int = 0,
     log_prefix: str = "segment",
 ) -> dict:
@@ -24,30 +31,155 @@ def segment_tiff(
     image = tifffile.imread(image_path)
     seg_input = select_channels(image, channels)
     ny, nx = seg_input.shape[:2]
+    seg_eval, scale = _downsample_for_segmentation(
+        seg_input,
+        max_size_px=max_segmentation_size_px,
+    )
 
-    if "model" not in state:
-        from cellpose import models
-
-        if verbose >= 2:
-            print(f"  [{log_prefix}] cold start: loading CellposeModel(gpu={gpu})")
-        state["model"] = models.CellposeModel(gpu=gpu)
-
-    channel_axis = -1 if seg_input.ndim == 3 else None
-    masks, flows, styles = state["model"].eval(seg_input, channel_axis=channel_axis)
+    channel_axis = -1 if seg_eval.ndim == 3 else None
+    eval_kwargs = _cellpose_eval_kwargs(
+        cellprob_threshold=cellprob_threshold,
+        flow_threshold=flow_threshold,
+        niter=niter,
+        diameter=diameter,
+    )
+    model, used_gpu, used_device = _get_cellpose_model(
+        state,
+        requested_gpu=bool(gpu),
+        verbose=verbose,
+        log_prefix=log_prefix,
+    )
+    try:
+        masks, flows, styles = model.eval(
+            seg_eval,
+            channel_axis=channel_axis,
+            **eval_kwargs,
+        )
+    except Exception:
+        if not gpu:
+            raise
+        if verbose >= 1:
+            print(f"  [{log_prefix}] GPU Cellpose failed; retrying on CPU")
+        state.pop("model", None)
+        state.pop("_cellpose_model_gpu", None)
+        state.pop("_cellpose_model_device", None)
+        model, used_gpu, used_device = _get_cellpose_model(
+            state,
+            requested_gpu=False,
+            verbose=verbose,
+            log_prefix=log_prefix,
+        )
+        masks, flows, styles = model.eval(
+            seg_eval,
+            channel_axis=channel_axis,
+            **eval_kwargs,
+        )
+    if scale != 1.0:
+        masks = _resize_nearest(masks, (ny, nx))
+    raw_masks = np.asarray(masks, dtype=np.int32)
+    raw_n_objects = int(raw_masks.max())
+    masks, dropped_labels = filter_masks_by_area(
+        raw_masks,
+        min_area_px=min_area_px,
+        max_area_px=max_area_px,
+    )
     n_objects = int(masks.max())
 
     image_2d = seg_input if seg_input.ndim == 2 else seg_input[..., 0]
 
     if verbose >= 1:
-        print(f"  [{log_prefix}] image={nx}x{ny}, objects={n_objects}")
+        seg_ny, seg_nx = seg_eval.shape[:2]
+        print(
+            f"  [{log_prefix}] image={nx}x{ny}, "
+            f"segmentation={seg_nx}x{seg_ny}, objects={n_objects}"
+        )
 
     return {
         "image": seg_input,
         "image_2d": image_2d,
+        "raw_masks": raw_masks,
         "masks": masks,
         "n_objects": n_objects,
+        "n_raw_objects": raw_n_objects,
+        "dropped_labels": dropped_labels,
+        "area_filter": {
+            "min_area_px": _none_or_int(min_area_px),
+            "max_area_px": _none_or_int(max_area_px),
+        },
+        "cellpose_params": {
+            "requested_gpu": bool(gpu),
+            "used_gpu": bool(used_gpu),
+            "device": used_device,
+            "cellprob_threshold": _none_or_float(cellprob_threshold),
+            "flow_threshold": _none_or_float(flow_threshold),
+            "niter": _none_or_int(niter),
+            "diameter": _none_or_float(diameter),
+        },
+        "segmentation_resize": {
+            "max_size_px": _none_or_int(max_segmentation_size_px),
+            "scale": float(scale),
+            "input_size_px": [int(seg_eval.shape[1]), int(seg_eval.shape[0])],
+        },
         "image_size_px": [int(nx), int(ny)],
     }
+
+
+def _get_cellpose_model(state, *, requested_gpu: bool, verbose: int, log_prefix: str):
+    if "model" in state:
+        return (
+            state["model"],
+            bool(state.get("_cellpose_model_gpu", requested_gpu)),
+            state.get("_cellpose_model_device", "cuda" if requested_gpu else "cpu"),
+        )
+
+    from cellpose import models
+
+    errors = []
+    for device_name, is_accelerated, kwargs in _cellpose_device_candidates(requested_gpu):
+        try:
+            if verbose >= 2:
+                print(f"  [{log_prefix}] cold start: loading CellposeModel({device_name})")
+            state["model"] = _instantiate_cellpose_model(models, kwargs)
+            state["_cellpose_model_gpu"] = is_accelerated
+            state["_cellpose_model_device"] = device_name
+            return state["model"], is_accelerated, device_name
+        except Exception as exc:
+            errors.append(f"{device_name}: {exc}")
+            if verbose >= 1 and device_name != "cpu":
+                print(f"  [{log_prefix}] Cellpose {device_name} unavailable; trying next device")
+
+    raise RuntimeError("Could not initialize CellposeModel on any device: " + "; ".join(errors))
+
+
+def _cellpose_device_candidates(prefer_accelerator: bool):
+    if not prefer_accelerator:
+        return [("cpu", False, {"gpu": False})]
+
+    candidates = []
+    try:
+        import torch
+    except Exception:
+        torch = None
+
+    if torch is not None and torch.cuda.is_available():
+        candidates.append(("cuda", True, {"gpu": True, "device": torch.device("cuda")}))
+    if (
+        torch is not None
+        and hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    ):
+        candidates.append(("mps", True, {"gpu": True, "device": torch.device("mps")}))
+    candidates.append(("cpu", False, {"gpu": False}))
+    return candidates
+
+
+def _instantiate_cellpose_model(models, kwargs):
+    try:
+        return models.CellposeModel(**kwargs)
+    except TypeError:
+        if "device" not in kwargs:
+            raise
+        return models.CellposeModel(gpu=bool(kwargs.get("gpu", False)))
 
 
 def select_channels(image, channels=None):
@@ -100,3 +232,159 @@ def _channel_indices(channels) -> list[int]:
     if isinstance(channels, (int, np.integer)):
         return [int(channels)]
     return [int(c) for c in channels]
+
+
+def filter_masks_by_area(masks, *, min_area_px=None, max_area_px=None):
+    min_area_px = _none_or_int(min_area_px)
+    max_area_px = _none_or_int(max_area_px)
+    if min_area_px is not None and min_area_px < 0:
+        raise ValueError("min_area_px must be >= 0.")
+    if max_area_px is not None and max_area_px < 0:
+        raise ValueError("max_area_px must be >= 0.")
+    if (
+        min_area_px is not None
+        and max_area_px is not None
+        and max_area_px < min_area_px
+    ):
+        raise ValueError("max_area_px must be >= min_area_px.")
+    if min_area_px is None and max_area_px is None:
+        return masks, []
+
+    masks = np.asarray(masks)
+    areas = np.bincount(masks.ravel())
+    keep = np.ones(len(areas), dtype=bool)
+    keep[0] = False
+    if min_area_px is not None:
+        keep &= areas >= min_area_px
+    if max_area_px is not None:
+        keep &= areas <= max_area_px
+
+    mapping = np.zeros(len(areas), dtype=np.int32)
+    next_label = 1
+    dropped_labels = []
+    for label in range(1, len(areas)):
+        if areas[label] == 0:
+            continue
+        if keep[label]:
+            mapping[label] = next_label
+            next_label += 1
+        else:
+            dropped_labels.append(int(label))
+    return mapping[masks].astype(np.int32, copy=False), dropped_labels
+
+
+_filter_masks_by_area = filter_masks_by_area
+
+
+def _downsample_for_segmentation(image, *, max_size_px=None):
+    max_size_px = _none_or_int(max_size_px)
+    if max_size_px is None:
+        return image, 1.0
+    if max_size_px <= 0:
+        raise ValueError("max_segmentation_size_px must be > 0.")
+
+    ny, nx = image.shape[:2]
+    max_dim = max(ny, nx)
+    if max_dim <= max_size_px:
+        return image, 1.0
+
+    scale = max_size_px / float(max_dim)
+    out_shape = (
+        max(1, int(round(ny * scale))),
+        max(1, int(round(nx * scale))),
+    )
+    return _resize_area(image, out_shape), scale
+
+
+def _resize_area(image, shape):
+    out_ny, out_nx = [int(v) for v in shape]
+    if out_ny <= 0 or out_nx <= 0:
+        raise ValueError("resize shape must be positive.")
+
+    arr = np.asarray(image)
+    in_ny, in_nx = arr.shape[:2]
+    if out_ny > in_ny or out_nx > in_nx:
+        raise ValueError("area resize is downsample-only.")
+    if out_ny == in_ny and out_nx == in_nx:
+        return arr
+
+    work = arr.astype(np.float32, copy=False)
+    work = _area_resize_axis(work, out_ny, axis=0)
+    work = _area_resize_axis(work, out_nx, axis=1)
+    return work
+
+
+def _area_resize_axis(arr, out_size, axis):
+    arr = np.asarray(arr)
+    in_size = arr.shape[axis]
+    if out_size == in_size:
+        return arr
+
+    scale = in_size / float(out_size)
+    out_shape = list(arr.shape)
+    out_shape[axis] = out_size
+    out = np.empty(out_shape, dtype=np.float32)
+
+    for out_idx in range(out_size):
+        start = out_idx * scale
+        stop = (out_idx + 1) * scale
+        lo = int(np.floor(start))
+        hi = int(np.ceil(stop))
+        weights = np.array(
+            [
+                max(0.0, min(stop, src_idx + 1) - max(start, src_idx))
+                for src_idx in range(lo, hi)
+            ],
+            dtype=np.float32,
+        )
+        selector = [slice(None)] * arr.ndim
+        selector[axis] = slice(lo, hi)
+        segment = arr[tuple(selector)]
+        weight_shape = [1] * arr.ndim
+        weight_shape[axis] = len(weights)
+        reduced = (segment * weights.reshape(weight_shape)).sum(axis=axis) / scale
+        out_selector = [slice(None)] * arr.ndim
+        out_selector[axis] = out_idx
+        out[tuple(out_selector)] = reduced
+    return out
+
+
+def _resize_nearest(image, shape):
+    out_ny, out_nx = [int(v) for v in shape]
+    if out_ny <= 0 or out_nx <= 0:
+        raise ValueError("resize shape must be positive.")
+
+    arr = np.asarray(image)
+    in_ny, in_nx = arr.shape[:2]
+    rows = np.minimum((np.arange(out_ny) * in_ny // out_ny), in_ny - 1)
+    cols = np.minimum((np.arange(out_nx) * in_nx // out_nx), in_nx - 1)
+    if arr.ndim == 2:
+        return arr[rows[:, None], cols]
+    return arr[rows[:, None], cols, :]
+
+
+def _cellpose_eval_kwargs(
+    *,
+    cellprob_threshold=None,
+    flow_threshold=None,
+    niter=None,
+    diameter=None,
+):
+    kwargs = {}
+    if cellprob_threshold is not None:
+        kwargs["cellprob_threshold"] = float(cellprob_threshold)
+    if flow_threshold is not None:
+        kwargs["flow_threshold"] = float(flow_threshold)
+    if niter is not None:
+        kwargs["niter"] = int(niter)
+    if diameter is not None:
+        kwargs["diameter"] = float(diameter)
+    return kwargs
+
+
+def _none_or_int(value):
+    return None if value is None else int(value)
+
+
+def _none_or_float(value):
+    return None if value is None else float(value)

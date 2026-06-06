@@ -37,6 +37,9 @@ OPTIONAL_CROP_COLUMNS = (
     "crop_height_px",
     "crop_width_px",
     "crop_complete",
+    "crop_in_bounds",
+    "object_complete",
+    "object_fits_crop",
     "crop_path",
     "mask_path",
 )

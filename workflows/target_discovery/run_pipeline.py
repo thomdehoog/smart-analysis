@@ -28,8 +28,19 @@ def main():
     parser.add_argument("overview_json", help="Path to a saved overview JSON file.")
     parser.add_argument("--cluster", action="store_true", help="Cluster embeddings before selecting targets.")
     parser.add_argument("--output-dir", default=None, help="Directory for clustering artifacts.")
+    parser.add_argument("--cluster-mode", default="manual", choices=["manual", "auto"])
     parser.add_argument("--n-neighbors", type=int, default=15)
     parser.add_argument("--leiden-resolution", type=float, default=1.0)
+    parser.add_argument(
+        "--auto-resolution-grid",
+        default="0.05,0.1,0.2,0.4,0.7,1.0,1.5,2.0,3.0,5.0",
+        help="Comma-separated Leiden resolutions for auto mode.",
+    )
+    parser.add_argument("--auto-refine-steps", type=int, default=2)
+    parser.add_argument("--auto-stability-repeats", type=int, default=3)
+    parser.add_argument("--auto-max-cluster-fraction", type=float, default=0.95)
+    parser.add_argument("--auto-min-cluster-size", type=int, default=2)
+    parser.add_argument("--auto-max-tiny-cluster-fraction", type=float, default=0.30)
     parser.add_argument("--umap-min-dist", type=float, default=0.1)
     parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--feature", default="area")
@@ -56,8 +67,15 @@ def main():
     if args.cluster:
         payload.update({
             "output_dir": args.output_dir,
+            "cluster_mode": args.cluster_mode,
             "n_neighbors": args.n_neighbors,
             "leiden_resolution": args.leiden_resolution,
+            "auto_resolution_grid": _parse_resolution_grid(args.auto_resolution_grid),
+            "auto_refine_steps": args.auto_refine_steps,
+            "auto_stability_repeats": args.auto_stability_repeats,
+            "auto_max_cluster_fraction": args.auto_max_cluster_fraction,
+            "auto_min_cluster_size": args.auto_min_cluster_size,
+            "auto_max_tiny_cluster_fraction": args.auto_max_tiny_cluster_fraction,
             "umap_min_dist": args.umap_min_dist,
             "random_state": args.random_state,
         })
@@ -91,6 +109,8 @@ def main():
     if clusters:
         print(f"  Clustered objects: {clusters['n_objects']}")
         print(f"  Clusters:          {clusters['n_clusters']}")
+        print(f"  Cluster mode:      {clusters.get('cluster_mode', 'manual')}")
+        print(f"  Resolution:        {clusters.get('leiden_resolution')}")
         artifacts = clusters.get("artifacts", {})
         if artifacts:
             print(f"  Cluster table:     {artifacts.get('cluster_table_csv')}")
@@ -105,6 +125,10 @@ def main():
     if len(targets) > 20:
         print(f"    ... {len(targets) - 20} more")
     print()
+
+
+def _parse_resolution_grid(text):
+    return [float(part.strip()) for part in str(text).split(",") if part.strip()]
 
 
 if __name__ == "__main__":

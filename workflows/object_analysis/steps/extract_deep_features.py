@@ -130,7 +130,7 @@ def _dinov2_embeddings(
     if input_size_px <= 0:
         raise ValueError("input_size_px must be > 0.")
 
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or _default_torch_device(torch)
     model_key = (model_name, device)
     if state.get("dinov2_model_key") != model_key:
         model = torch.hub.load("facebookresearch/dinov2", model_name)
@@ -148,6 +148,14 @@ def _dinov2_embeddings(
             features = torch.nn.functional.normalize(features, p=2, dim=1)
             vectors.extend(features.cpu().numpy().astype(float).tolist())
     return vectors
+
+
+def _default_torch_device(torch) -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def _crop_batch(objects: list[dict], input_size_px: int, torch):

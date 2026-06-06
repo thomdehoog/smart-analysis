@@ -1,22 +1,15 @@
-# Object-centered analysis with optional DINOv2 embeddings.
+# Object feature extraction from a saved detection checkpoint.
 
 metadata:
-  purpose: "Object-centered image analysis with deep features"
+  purpose: "Object features from saved detection masks"
   version: "1.0"
   verbose: 1
   functions_dir: "../steps"
 
-object_analysis:
-  - detect_objects:
-      channels: null
-      cellprob_threshold: 0.0
-      flow_threshold: 0.4
-      niter: null
-      diameter: null
-      max_segmentation_size_px: 512
+object_features:
+  - load_detected_objects:
       min_area_px: 1000
       max_area_px: null
-      gpu: true
 
   - extract_classical_features:
 

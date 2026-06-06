@@ -8,8 +8,15 @@ metadata:
 
 target_discovery:
   - cluster_objects:
+      cluster_mode: "manual"   # "manual" or "auto"
       n_neighbors: 15
       leiden_resolution: 1.0
+      auto_resolution_grid: [0.05, 0.1, 0.2, 0.4, 0.7, 1.0, 1.5, 2.0, 3.0, 5.0]
+      auto_refine_steps: 2
+      auto_stability_repeats: 3
+      auto_max_cluster_fraction: 0.95
+      auto_min_cluster_size: 2
+      auto_max_tiny_cluster_fraction: 0.30
       random_state: 0
       umap_min_dist: 0.1
       output_dir: null

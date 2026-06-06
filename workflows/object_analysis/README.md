@@ -17,6 +17,24 @@ detect_objects -> extract_classical_features -> extract_deep_features -> build_o
 `extract_deep_features` is optional. Include the deep YAML when DINOv2
 embeddings and object crops are needed; otherwise use the classical YAML.
 
+Checkpointed path for iterative rare-event selection:
+
+```text
+object_detection.yaml:      detect_objects
+object_features_deep.yaml:  load_detected_objects -> extract_classical_features -> extract_deep_features -> build_object_table
+```
+
+Use the checkpointed path when segmentation should be run once and feature
+extraction/clustering should be re-run with different crop or selection
+settings. The detection step writes masks plus a checkpoint JSON; the feature
+pipeline reloads that checkpoint and rejects stale masks when the recorded
+segmentation-parameter hash does not match the requested run.
+The hash covers true mask-generation parameters (`channels`, Cellpose
+thresholds, `niter`, `diameter`, and `max_segmentation_size_px`). It
+deliberately excludes GPU/CPU placement and area filters. Area filters are
+post-segmentation filters and can be retuned from the raw masks without
+running Cellpose again.
+
 ## Input Payload
 
 Submit one tile at a time:
@@ -39,6 +57,29 @@ Submit one tile at a time:
 explicit list such as `[0, 2]` to choose channels from a larger stack. Plain
 2D images accept `None` or `[0]`; any other channel is rejected.
 
+Object-size filtering is configured in the workflow YAML:
+
+```yaml
+- detect_objects:
+    channels: null
+    cellprob_threshold: 0.0
+    flow_threshold: 0.4
+    niter: null
+    diameter: null
+    max_segmentation_size_px: 512
+    min_area_px: 1000
+    max_area_px: null
+```
+
+`min_area_px` and `max_area_px` are area thresholds on the detected mask
+labels. Use `null` to disable either bound.
+`max_segmentation_size_px` downscales large tiles before Cellpose and then
+rescales masks back to the original image size; it never upsamples small
+tiles. `cellprob_threshold` controls how much marginal cell-probability is
+included (lower values usually produce larger/more masks), `flow_threshold`
+controls Cellpose's flow-consistency QC, and `niter` can be increased for
+very long objects.
+
 Optional artifact persistence:
 
 ```python
@@ -47,26 +88,46 @@ Optional artifact persistence:
 }
 ```
 
-When `output_dir` is provided on the deep path, `extract_deep_features`
-writes tile masks and per-object crop artifacts under `tiles/` and
-`objects/`. Classical-only runs do not cut crops by default.
+When `output_dir` is provided, `detect_objects` writes filtered `masks.tif`,
+unfiltered `raw_masks.tif`, and `detection_checkpoint.json` under
+`tiles/<tile_name>/`. The checkpoint records content hashes for the source
+image and raw masks so feature extraction cannot silently pair stale masks
+with changed image data. On the deep path, `extract_deep_features` also writes
+per-object crop artifacts under `objects/`. Classical-only runs do not cut
+crops by default.
+
+To re-enter feature extraction from a saved detection checkpoint, submit:
+
+```python
+{
+    "detection_checkpoint_path": "analysis/object_detection/tiles/R0_r003_c007/detection_checkpoint.json",
+    "segmentation_params_hash": "<hash from detection>",
+    "min_area_px": 1000,
+    "max_area_px": null,
+    "output_dir": "analysis/object_features/run_001",
+}
+```
 
 Deep crops are configured in `pipelines/object_analysis_deep.yaml`:
 
 ```yaml
 - extract_deep_features:
     crop_size_px: 128
-    mask: false
+    mask: true
     drop_incomplete_crops: true
 ```
 
 `crop_size_px` is the fixed square extraction size used for every object
-in the run. `mask: false` keeps local context in the crop; `mask: true`
-zeros non-object pixels while still writing the object mask.
-`drop_incomplete_crops: true` excludes objects whose full fixed crop would
-cross the tile boundary. The DINO path does not perform adaptive intensity
-normalization; integer crops are converted by dtype range, and float crops
-must already be in `[0, 1]` from upstream preprocessing.
+in the run. `mask: true` zeros non-object pixels so the deep crop contains
+the segmented object only, while still writing the object mask separately.
+Set `mask: false` only when local context should be embedded.
+`drop_incomplete_crops: true` excludes objects whose mask touches the tile
+boundary or whose bbox does not fit inside the fixed crop. For masked crops,
+the crop window may extend outside the tile and is zero-padded; for unmasked
+context crops, the full crop window must stay inside the tile. The DINO path
+does not perform adaptive intensity normalization; integer crops are converted
+by dtype range, and float crops must already be in `[0, 1]` from upstream
+preprocessing.
 
 ## Output
 

@@ -29,12 +29,41 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
     resolution = float(_setting(inp, params, "leiden_resolution", 1.0))
     random_state = int(_setting(inp, params, "random_state", 0))
     min_dist = float(_setting(inp, params, "umap_min_dist", 0.1))
+    cluster_mode = str(_setting(inp, params, "cluster_mode", "manual")).lower()
 
     rows, vectors = _collect_embedding_rows(overview["tiles"])
+    resolution_sweep = []
+    selected_resolution = resolution
+    if cluster_mode == "auto":
+        auto = _auto_select_resolution(
+            vectors,
+            n_neighbors=n_neighbors,
+            random_state=random_state,
+            initial_grid=_float_list(
+                _setting(
+                    inp,
+                    params,
+                    "auto_resolution_grid",
+                    [0.05, 0.1, 0.2, 0.4, 0.7, 1.0, 1.5, 2.0, 3.0, 5.0],
+                )
+            ),
+            refine_steps=int(_setting(inp, params, "auto_refine_steps", 2)),
+            stability_repeats=int(_setting(inp, params, "auto_stability_repeats", 3)),
+            max_cluster_fraction=float(_setting(inp, params, "auto_max_cluster_fraction", 0.95)),
+            min_cluster_size=int(_setting(inp, params, "auto_min_cluster_size", 2)),
+            max_tiny_cluster_fraction=float(
+                _setting(inp, params, "auto_max_tiny_cluster_fraction", 0.30)
+            ),
+        )
+        selected_resolution = float(auto["selected_resolution"])
+        resolution_sweep = auto["sweep"]
+    elif cluster_mode != "manual":
+        raise ValueError("cluster_mode must be 'manual' or 'auto'.")
+
     cluster_ids, umap_xy = _cluster_vectors(
         vectors,
         n_neighbors=n_neighbors,
-        resolution=resolution,
+        resolution=selected_resolution,
         random_state=random_state,
         min_dist=min_dist,
     )
@@ -45,16 +74,19 @@ def run(pipeline_data: dict, state: dict, **params) -> dict:
         row["umap_y"] = float(umap_xy[idx][1])
 
     _write_back_columns(overview["tiles"], rows)
-    artifacts = _write_artifacts(rows, output_dir)
+    artifacts = _write_artifacts(rows, output_dir, resolution_sweep=resolution_sweep)
 
     clusters = to_builtin({
         "n_objects": len(rows),
         "n_clusters": len(set(cluster_ids)) if cluster_ids else 0,
         "method": "cosine_knn_leiden_umap",
+        "cluster_mode": cluster_mode,
         "n_neighbors": n_neighbors,
-        "leiden_resolution": resolution,
+        "leiden_resolution": selected_resolution,
+        "requested_leiden_resolution": resolution,
         "random_state": random_state,
         "table": rows,
+        "resolution_sweep": resolution_sweep,
         "artifacts": artifacts,
     })
 
@@ -128,13 +160,28 @@ def _cluster_vectors(
     if n_objects == 2:
         return [0, 0], [[0.0, 0.0], [1.0, 0.0]]
 
-    import igraph
-    import leidenalg
     import numpy as np
     import umap
-    from sklearn.neighbors import NearestNeighbors
 
     x = np.asarray(vectors, dtype=float)
+    graph, k = _build_knn_graph(x, n_neighbors)
+    cluster_ids = _leiden_labels(graph, resolution, random_state)
+
+    reducer = umap.UMAP(
+        n_neighbors=k,
+        min_dist=min_dist,
+        metric="cosine",
+        random_state=random_state,
+    )
+    umap_xy = reducer.fit_transform(x).astype(float).tolist()
+    return cluster_ids, umap_xy
+
+
+def _build_knn_graph(x, n_neighbors: int):
+    import igraph
+    from sklearn.neighbors import NearestNeighbors
+
+    n_objects = int(x.shape[0])
     k = max(1, min(int(n_neighbors), n_objects - 1))
     nn = NearestNeighbors(n_neighbors=k + 1, metric="cosine")
     nn.fit(x)
@@ -149,26 +196,206 @@ def _cluster_vectors(
 
     graph = igraph.Graph(n=n_objects, edges=list(edge_weights))
     graph.es["weight"] = list(edge_weights.values())
+    return graph, k
+
+
+def _leiden_labels(graph, resolution: float, random_state: int) -> list[int]:
+    import leidenalg
+
     partition = leidenalg.find_partition(
         graph,
         leidenalg.RBConfigurationVertexPartition,
         weights="weight",
-        resolution_parameter=resolution,
-        seed=random_state,
+        resolution_parameter=float(resolution),
+        seed=int(random_state),
     )
-    cluster_ids = [0] * n_objects
+    labels = [0] * graph.vcount()
     for cluster_id, members in enumerate(partition):
         for member in members:
-            cluster_ids[int(member)] = int(cluster_id)
+            labels[int(member)] = int(cluster_id)
+    return labels
 
-    reducer = umap.UMAP(
-        n_neighbors=k,
-        min_dist=min_dist,
-        metric="cosine",
-        random_state=random_state,
+
+def _auto_select_resolution(
+    vectors: list[list[float]],
+    *,
+    n_neighbors: int,
+    random_state: int,
+    initial_grid: list[float],
+    refine_steps: int,
+    stability_repeats: int,
+    max_cluster_fraction: float,
+    min_cluster_size: int,
+    max_tiny_cluster_fraction: float,
+) -> dict:
+    import numpy as np
+    from sklearn.metrics import adjusted_rand_score
+
+    n_objects = len(vectors)
+    if n_objects < 3:
+        return {
+            "selected_resolution": 1.0,
+            "sweep": [],
+        }
+
+    x = np.asarray(vectors, dtype=float)
+    graph, _ = _build_knn_graph(x, n_neighbors)
+    candidates = sorted({float(r) for r in initial_grid if float(r) > 0})
+    if not candidates:
+        raise ValueError("auto_resolution_grid must contain at least one positive value.")
+
+    labels_by_resolution = _labels_for_resolutions(
+        graph, candidates, random_state=random_state
     )
-    umap_xy = reducer.fit_transform(x).astype(float).tolist()
-    return cluster_ids, umap_xy
+    for _ in range(max(0, int(refine_steps))):
+        new_candidates = set(candidates)
+        for left, right in zip(candidates, candidates[1:]):
+            if adjusted_rand_score(labels_by_resolution[left], labels_by_resolution[right]) < 0.999:
+                new_candidates.add((left + right) / 2.0)
+        if len(new_candidates) == len(candidates):
+            break
+        candidates = sorted(new_candidates)
+        labels_by_resolution.update(
+            _labels_for_resolutions(
+                graph,
+                [r for r in candidates if r not in labels_by_resolution],
+                random_state=random_state,
+            )
+        )
+
+    rows = []
+    unique_labels = []
+    for resolution in candidates:
+        labels = labels_by_resolution[resolution]
+        duplicate_of = None
+        for previous_resolution, previous_labels in unique_labels:
+            if adjusted_rand_score(labels, previous_labels) >= 0.999:
+                duplicate_of = previous_resolution
+                break
+        if duplicate_of is None:
+            unique_labels.append((resolution, labels))
+
+        row = _score_resolution(
+            x,
+            graph,
+            labels,
+            resolution=resolution,
+            random_state=random_state,
+            stability_repeats=stability_repeats,
+            max_cluster_fraction=max_cluster_fraction,
+            min_cluster_size=min_cluster_size,
+            max_tiny_cluster_fraction=max_tiny_cluster_fraction,
+            duplicate_of=duplicate_of,
+        )
+        rows.append(row)
+
+    selected = _choose_resolution(rows)
+    for row in rows:
+        row["selected"] = bool(row["resolution"] == selected["resolution"])
+    return {
+        "selected_resolution": float(selected["resolution"]),
+        "sweep": rows,
+    }
+
+
+def _labels_for_resolutions(graph, resolutions, *, random_state: int) -> dict[float, list[int]]:
+    return {
+        float(resolution): _leiden_labels(graph, float(resolution), random_state)
+        for resolution in resolutions
+    }
+
+
+def _score_resolution(
+    x,
+    graph,
+    labels: list[int],
+    *,
+    resolution: float,
+    random_state: int,
+    stability_repeats: int,
+    max_cluster_fraction: float,
+    min_cluster_size: int,
+    max_tiny_cluster_fraction: float,
+    duplicate_of,
+) -> dict:
+    import numpy as np
+    from sklearn.metrics import adjusted_rand_score, silhouette_score
+
+    labels_arr = np.asarray(labels, dtype=int)
+    _, counts = np.unique(labels_arr, return_counts=True)
+    n_objects = int(labels_arr.size)
+    n_clusters = int(counts.size)
+    min_size = int(counts.min()) if counts.size else 0
+    max_size = int(counts.max()) if counts.size else 0
+    max_fraction = float(max_size / n_objects) if n_objects else 0.0
+    tiny_clusters = int((counts < int(min_cluster_size)).sum()) if counts.size else 0
+    tiny_cluster_fraction = float(tiny_clusters / n_clusters) if n_clusters else 0.0
+
+    silhouette = None
+    if 1 < n_clusters < n_objects:
+        try:
+            silhouette = float(silhouette_score(x, labels_arr, metric="cosine"))
+        except ValueError:
+            silhouette = None
+
+    stability = None
+    if stability_repeats > 0 and n_clusters > 1:
+        scores = []
+        for offset in range(1, int(stability_repeats) + 1):
+            other = _leiden_labels(graph, resolution, random_state + offset)
+            scores.append(float(adjusted_rand_score(labels, other)))
+        stability = float(np.mean(scores)) if scores else None
+
+    valid = (
+        n_clusters >= 2
+        and max_fraction <= float(max_cluster_fraction)
+        and tiny_cluster_fraction <= float(max_tiny_cluster_fraction)
+    )
+    return {
+        "resolution": float(resolution),
+        "n_clusters": n_clusters,
+        "min_cluster_size": min_size,
+        "max_cluster_size": max_size,
+        "max_cluster_fraction": max_fraction,
+        "tiny_clusters": tiny_clusters,
+        "tiny_cluster_fraction": tiny_cluster_fraction,
+        "silhouette": silhouette,
+        "stability_ari": stability,
+        "valid": bool(valid),
+        "duplicate_of": duplicate_of,
+        "selected": False,
+    }
+
+
+def _choose_resolution(rows: list[dict]) -> dict:
+    pool = [row for row in rows if row["valid"]]
+    if not pool:
+        pool = [row for row in rows if row["n_clusters"] >= 2] or list(rows)
+
+    def key(row):
+        stability = -1.0 if row["stability_ari"] is None else float(row["stability_ari"])
+        silhouette = -1.0 if row["silhouette"] is None else float(row["silhouette"])
+        return (
+            row["valid"],
+            stability,
+            silhouette,
+            -float(row["resolution"]),
+        )
+
+    return max(pool, key=key)
+
+
+def _float_list(value) -> list[float]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        return [float(part.strip()) for part in text.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [float(v) for v in value]
+    return [float(value)]
 
 
 def _write_back_columns(tiles: list[dict], rows: list[dict]) -> None:
@@ -187,7 +414,7 @@ def _write_back_columns(tiles: list[dict], rows: list[dict]) -> None:
         props["umap_y"][idx] = row["umap_y"]
 
 
-def _write_artifacts(rows: list[dict], output_dir) -> dict:
+def _write_artifacts(rows: list[dict], output_dir, *, resolution_sweep=None) -> dict:
     if output_dir is None:
         return {}
     features_dir = Path(output_dir) / "features"
@@ -195,17 +422,27 @@ def _write_artifacts(rows: list[dict], output_dir) -> dict:
     csv_path = features_dir / "clusters.csv"
     json_path = features_dir / "clusters.json"
     svg_path = features_dir / "clusters_umap.svg"
+    sweep_csv_path = features_dir / "cluster_resolution_sweep.csv"
+    sweep_json_path = features_dir / "cluster_resolution_sweep.json"
 
     _write_csv(csv_path, rows)
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(to_builtin({"objects": rows}), handle, indent=2, allow_nan=False)
         handle.write("\n")
     _write_svg(svg_path, rows)
-    return {
+    artifacts = {
         "cluster_table_csv": str(csv_path),
         "cluster_table_json": str(json_path),
         "cluster_plot_svg": str(svg_path),
     }
+    if resolution_sweep:
+        _write_sweep_csv(sweep_csv_path, resolution_sweep)
+        with sweep_json_path.open("w", encoding="utf-8") as handle:
+            json.dump(to_builtin({"resolution_sweep": resolution_sweep}), handle, indent=2, allow_nan=False)
+            handle.write("\n")
+        artifacts["resolution_sweep_csv"] = str(sweep_csv_path)
+        artifacts["resolution_sweep_json"] = str(sweep_json_path)
+    return artifacts
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -231,6 +468,27 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
             out = dict(row)
             out["tile_id"] = json.dumps(row["tile_id"], separators=(",", ":"))
             writer.writerow(out)
+
+
+def _write_sweep_csv(path: Path, rows: list[dict]) -> None:
+    columns = (
+        "resolution",
+        "n_clusters",
+        "min_cluster_size",
+        "max_cluster_size",
+        "max_cluster_fraction",
+        "tiny_clusters",
+        "tiny_cluster_fraction",
+        "silhouette",
+        "stability_ari",
+        "valid",
+        "duplicate_of",
+        "selected",
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _write_svg(path: Path, rows: list[dict]) -> None:

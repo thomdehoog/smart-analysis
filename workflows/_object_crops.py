@@ -26,8 +26,11 @@ def extract_object_crops(
     The crop is centered on the object centroid, has the same fixed size for
     every object, and is zero-padded at image borders. Set ``mask=True`` to
     zero non-object pixels while still returning the object mask separately.
-    When ``drop_incomplete=True``, objects whose full fixed crop would require
-    border padding are skipped.
+    When ``drop_incomplete=True``, objects whose own mask touches the image
+    boundary or does not fit inside the fixed crop are skipped. Context crops
+    (``mask=False``) also require the full crop window to stay inside the
+    image; masked crops may use zero padding outside the tile because the
+    background is dark by design.
     """
     if crop_size_px <= 0:
         raise ValueError("crop_size_px must be > 0.")
@@ -66,6 +69,7 @@ def extract_object_crops(
             masks=masks,
             label=label,
             centroid=centroid,
+            bbox=bbox,
             crop_size_px=int(crop_size_px),
             mask=bool(mask),
         )
@@ -85,6 +89,9 @@ def extract_object_crops(
             "crop_height_px": int(crop["image"].shape[0]),
             "crop_width_px": int(crop["image"].shape[1]),
             "crop_complete": bool(crop["complete"]),
+            "crop_in_bounds": bool(crop["crop_in_bounds"]),
+            "object_complete": bool(crop["object_complete"]),
+            "object_fits_crop": bool(crop["object_fits_crop"]),
             "crop_image": crop["image"],
             "crop_mask": crop["mask"],
             "crop_path": None,
@@ -114,6 +121,7 @@ def _crop_one(
     masks,
     label: int,
     centroid,
+    bbox,
     crop_size_px: int,
     mask: bool,
 ) -> dict:
@@ -125,7 +133,21 @@ def _crop_one(
     col1 = col0 + size
 
     ny, nx = masks.shape
-    complete = row0 >= 0 and col0 >= 0 and row1 <= ny and col1 <= nx
+    crop_in_bounds = row0 >= 0 and col0 >= 0 and row1 <= ny and col1 <= nx
+    bbox_min_row, bbox_min_col, bbox_max_row, bbox_max_col = [int(v) for v in bbox]
+    object_complete = (
+        bbox_min_row > 0
+        and bbox_min_col > 0
+        and bbox_max_row < ny
+        and bbox_max_col < nx
+    )
+    object_fits_crop = (
+        bbox_min_row >= row0
+        and bbox_min_col >= col0
+        and bbox_max_row <= row1
+        and bbox_max_col <= col1
+    )
+    complete = object_complete and object_fits_crop and (mask or crop_in_bounds)
     src_r0 = max(0, row0)
     src_c0 = max(0, col0)
     src_r1 = min(ny, row1)
@@ -155,6 +177,9 @@ def _crop_one(
         "image": crop_image,
         "mask": crop_mask,
         "complete": complete,
+        "crop_in_bounds": crop_in_bounds,
+        "object_complete": object_complete,
+        "object_fits_crop": object_fits_crop,
         "origin_row_px": row0,
         "origin_col_px": col0,
     }

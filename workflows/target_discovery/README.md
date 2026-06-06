@@ -79,6 +79,7 @@ Cluster embeddings first, then select:
 
 ```bash
 python workflows/target_discovery/run_pipeline.py overview.json --cluster --output-dir analysis/target_discovery/run_001
+python workflows/target_discovery/run_pipeline.py overview.json --cluster --cluster-mode auto --output-dir analysis/target_discovery/run_001
 ```
 
 The clustering path builds a cosine kNN graph on object embeddings,
@@ -87,6 +88,13 @@ table and a scatterplot. The table is the source of truth and includes
 object identity, absolute `stage_x_um` / `stage_y_um`, `cluster_id`,
 `umap_x`, and `umap_y`. The scatterplot is a visual artifact of that
 same table.
+
+Manual clustering uses `--n-neighbors` and `--leiden-resolution` directly.
+Auto clustering keeps `n_neighbors` fixed, sweeps Leiden resolution over a
+broad grid, refines intervals where the clustering changes, and reports a
+resolution-sweep table with cluster count, size balance, silhouette, and
+stability (ARI) scores. The selected resolution is a recommendation, not a
+biological ground truth; inspect the score table and cluster galleries.
 
 ## Environment
 

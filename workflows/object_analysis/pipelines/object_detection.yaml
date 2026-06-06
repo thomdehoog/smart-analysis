@@ -1,12 +1,12 @@
-# Object-centered analysis for one acquired image tile.
+# Object detection checkpoint for one acquired image tile.
 
 metadata:
-  purpose: "Object-centered image analysis"
+  purpose: "Object detection checkpoint"
   version: "1.0"
   verbose: 1
   functions_dir: "../steps"
 
-object_analysis:
+object_detection:
   - detect_objects:
       channels: null
       cellprob_threshold: 0.0
@@ -17,7 +17,4 @@ object_analysis:
       min_area_px: 1000
       max_area_px: null
       gpu: true
-
-  - extract_classical_features:
-
-  - build_object_table:
+      persist_only: true

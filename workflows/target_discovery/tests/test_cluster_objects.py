@@ -76,6 +76,54 @@ def test_cluster_pipeline_writes_table_plot_and_preserves_positions(tmp_path):
     assert [target["stage_x_um"] for target in targets] == [1120.0, 1110.0]
 
 
+@pytest.mark.cluster
+def test_cluster_pipeline_auto_resolution_reports_sweep(tmp_path):
+    overview = {"tiles": [_tile()]}
+    output_dir = tmp_path / "target_discovery"
+
+    payload = {
+        "tiles": overview["tiles"],
+        "output_dir": str(output_dir),
+        "cluster_mode": "auto",
+        "n_neighbors": 2,
+        "leiden_resolution": 1.0,
+        "auto_resolution_grid": [0.05, 0.2, 0.7, 1.5, 3.0],
+        "auto_refine_steps": 1,
+        "auto_stability_repeats": 1,
+        "auto_max_cluster_fraction": 0.95,
+        "auto_min_cluster_size": 2,
+        "auto_max_tiny_cluster_fraction": 0.5,
+        "random_state": 7,
+        "feature": "area",
+        "direction": "high",
+        "n_per_tile": 2,
+    }
+
+    with Engine() as engine:
+        engine.register("target_discovery_cluster", str(CLUSTER_YAML))
+        engine.submit("target_discovery_cluster", payload)
+        results = _wait_for_result(engine, "target_discovery_cluster")
+
+    clusters = results[0]["target_discovery"]["clusters"]
+    sweep = clusters["resolution_sweep"]
+    selected = [row for row in sweep if row["selected"]]
+
+    assert clusters["cluster_mode"] == "auto"
+    assert clusters["leiden_resolution"] in {row["resolution"] for row in sweep}
+    assert len(sweep) >= len(payload["auto_resolution_grid"])
+    assert len(selected) == 1
+    assert selected[0]["resolution"] == clusters["leiden_resolution"]
+    assert selected[0]["n_clusters"] >= 2
+    assert "silhouette" in selected[0]
+    assert "stability_ari" in selected[0]
+
+    artifacts = clusters["artifacts"]
+    assert Path(artifacts["resolution_sweep_csv"]).exists()
+    assert Path(artifacts["resolution_sweep_json"]).exists()
+    saved = json.loads(Path(artifacts["resolution_sweep_json"]).read_text(encoding="utf-8"))
+    assert saved["resolution_sweep"][0]["resolution"] == sweep[0]["resolution"]
+
+
 def _wait_for_result(engine, name, timeout=120):
     import time
 
