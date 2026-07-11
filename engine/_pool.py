@@ -47,10 +47,13 @@ class _EnvPool:
         self._idle = []
         self._busy = []
         self._lock = threading.Lock()
+        self._closed = False
 
     def acquire(self):
         """Get an idle worker or create a new one. Marks it busy."""
         with self._lock:
+            if self._closed:
+                raise RuntimeError("Worker pool has been shut down")
             # Try to reuse an idle worker
             while self._idle:
                 worker = self._idle.pop()
@@ -76,7 +79,7 @@ class _EnvPool:
                 self._busy.remove(worker)
             except ValueError:
                 pass
-            if worker.is_alive():
+            if worker.is_alive() and not self._closed:
                 self._idle.append(worker)
 
     def reap_idle(self):
@@ -102,6 +105,7 @@ class _EnvPool:
     def shutdown_all(self):
         """Shut down all workers in this pool."""
         with self._lock:
+            self._closed = True
             all_workers = self._idle + self._busy
             self._idle.clear()
             self._busy.clear()
@@ -144,6 +148,7 @@ class WorkerPool:
 
         self._shutdown_event = threading.Event()
         self._reaper = None
+        self._closed = False
 
     def execute(self, environment, step_path, pipeline_data, params,
                 max_workers=1, timeout=300.0):
@@ -184,6 +189,8 @@ class WorkerPool:
     def _get_env_pool(self, environment):
         """Get or create the pool for an environment."""
         with self._pool_lock:
+            if self._closed:
+                raise RuntimeError("WorkerPool has been shut down")
             if environment not in self._env_pools:
                 env_label = environment or "orchestrator"
                 logger.info("Pool: creating env pool for %s", env_label)
@@ -237,6 +244,7 @@ class WorkerPool:
         self._shutdown_event.set()
 
         with self._pool_lock:
+            self._closed = True
             pools = list(self._env_pools.values())
             n = len(pools)
 

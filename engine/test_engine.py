@@ -470,8 +470,11 @@ class TestPool(unittest.TestCase):
 
     def test_shutdown_before_use(self):
         from engine._pool import WorkerPool
+        path = _temp_step("def run(pd, state, **p): return pd")
         pool = WorkerPool()
         pool.shutdown_all()
+        with self.assertRaisesRegex(RuntimeError, "shut down"):
+            pool.execute(None, path, {}, {}, timeout=10)
 
     def test_error_through_pool(self):
         from engine._pool import WorkerPool
@@ -1162,6 +1165,43 @@ class TestEngineLifecycle(unittest.TestCase):
         e.shutdown()
         e.shutdown()  # should not raise
 
+    def test_shutdown_without_wait_cancels_queue_and_closes_workers(self):
+        _temp_step("""
+            import time
+            def run(pd, state, **p):
+                time.sleep(0.3)
+                return pd
+        """, name="shutdown_slow")
+        yaml = _temp_yaml("wf:\n  - shutdown_slow:")
+        from engine import Engine
+
+        e = Engine(max_concurrent=1)
+        e.register("test", yaml)
+        for i in range(12):
+            e.submit("test", {"i": i})
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if e.status("test")["running"] == 1:
+                break
+            time.sleep(0.01)
+        self.assertEqual(e.status("test")["running"], 1)
+
+        e.shutdown(wait=False)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status = e.status("test")
+            if status["pending"] == 0 and status["running"] == 0:
+                break
+            time.sleep(0.01)
+
+        status = e.status("test")
+        self.assertEqual(status["pending"], 0)
+        self.assertEqual(status["running"], 0)
+        self.assertEqual(status["completed"] + status["failed"], 12)
+        self.assertEqual(e._pool.status["workers"], [])
+
 
 # ---- Engine (status) -------------------------------------------------
 
@@ -1197,6 +1237,39 @@ class TestEngineStatus(unittest.TestCase):
         with Engine() as e:
             with self.assertRaises(KeyError):
                 e.status("ghost")
+
+    def test_status_tracks_pending_and_running_jobs(self):
+        _temp_step("""
+            import time
+            def run(pd, state, **p):
+                time.sleep(0.3)
+                return pd
+        """, name="status_slow")
+        yaml = _temp_yaml("wf:\n  - status_slow:")
+        from engine import Engine
+
+        with Engine(max_concurrent=1) as e:
+            e.register("test", yaml)
+            e.submit("test", {})
+            e.submit("test", {})
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                status = e.status("test")
+                if status["running"] == 1 and status["pending"] == 1:
+                    break
+                time.sleep(0.01)
+
+            self.assertEqual(status["pending"], 1)
+            self.assertEqual(status["running"], 1)
+            self.assertEqual(status["completed"], 0)
+            results = _wait_for_results(e, "test", 2, timeout=5)
+            status = e.status("test")
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(status["pending"], 0)
+        self.assertEqual(status["running"], 0)
+        self.assertEqual(status["completed"], 2)
 
 
 # ---- Engine (multi-pipeline) ----------------------------------------
@@ -1285,6 +1358,41 @@ class TestEnginePriority(unittest.TestCase):
 
         order = [r["i"] for r in results]
         self.assertEqual(order, [0, 1, 2, 3, 4])
+
+    def test_scope_completion_does_not_block_lower_priority_phase0(self):
+        _temp_step("""
+            def run(pd, state, **p):
+                pd["value"] = pd["input"]["value"]
+                return pd
+        """, name="priority_scoped_input")
+        _temp_step("""
+            def run(pd, state, **p):
+                pd["total"] = sum(item["value"] for item in pd["results"])
+                return pd
+        """, name="priority_scoped_collect")
+        yaml = _temp_yaml("""
+            wf:
+              - priority_scoped_input:
+              - priority_scoped_collect:
+                  scope: group
+        """)
+        from engine import Engine
+
+        with Engine(max_concurrent=1) as e:
+            e.register("test", yaml)
+            e.submit(
+                "test",
+                {"value": 7},
+                scope={"group": "G"},
+                priority=-10,
+                complete="group",
+            )
+            results = _wait_for_results(e, "test", 2, timeout=5)
+
+        scoped = [result for result in results if result["_phase"] == 1]
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(scoped), 1)
+        self.assertEqual(scoped[0]["total"], 7)
 
 
 # ---- Package API -----------------------------------------------------

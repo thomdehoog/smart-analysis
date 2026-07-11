@@ -162,6 +162,8 @@ class PipelineState:
 
         # Status counters
         self._n_submitted = 0
+        self._n_pending = 0
+        self._n_running = 0
         self._n_completed = 0
         self._n_failed = 0
         self._failures = []
@@ -172,12 +174,24 @@ class PipelineState:
             idx = self._submission_counter
             self._submission_counter += 1
             self._n_submitted += 1
+            self._n_pending += 1
             return idx
 
     def add_job_entry(self, future, scope, submission_idx):
         """Record a submitted job's future and scope."""
         with self._lock:
             self._job_entries.append((future, scope, submission_idx))
+        future.add_done_callback(
+            lambda done: self.record_cancellation(scope)
+            if done.cancelled() else None
+        )
+
+    def record_start(self, is_submission=True):
+        """Move an operation from pending to running."""
+        with self._lock:
+            if is_submission:
+                self._n_pending = max(0, self._n_pending - 1)
+            self._n_running += 1
 
     def store_phase0_result(self, submission_idx, scope, result):
         """Store a Phase 0 result for later scope collection."""
@@ -194,16 +208,29 @@ class PipelineState:
     def record_completion(self):
         """Record that a job/phase completed successfully."""
         with self._lock:
+            self._n_running = max(0, self._n_running - 1)
             self._n_completed += 1
 
     def record_failure(self, scope, step_name, error_msg):
         """Record a job failure."""
         with self._lock:
+            self._n_running = max(0, self._n_running - 1)
             self._n_failed += 1
             self._failures.append({
                 "scope": scope,
                 "step": step_name,
                 "error": error_msg,
+            })
+
+    def record_cancellation(self, scope):
+        """Record a queued submission cancelled during engine shutdown."""
+        with self._lock:
+            self._n_pending = max(0, self._n_pending - 1)
+            self._n_failed += 1
+            self._failures.append({
+                "scope": scope,
+                "step": "engine",
+                "error": "Cancelled during engine shutdown",
             })
 
     def get_triggered_phase_idx(self, level):
@@ -311,9 +338,8 @@ class PipelineState:
         """Current pipeline state for observability."""
         with self._lock:
             return {
-                "pending": max(0, self._n_submitted - self._n_completed
-                               - self._n_failed),
-                "running": 0,  # approximation; exact would need future tracking
+                "pending": self._n_pending,
+                "running": self._n_running,
                 "completed": self._n_completed,
                 "failed": self._n_failed,
                 "failures": list(self._failures),

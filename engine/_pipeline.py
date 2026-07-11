@@ -28,7 +28,7 @@ import logging
 import os
 import sys
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -92,9 +92,15 @@ class _PriorityThreadPool:
                 future.set_exception(e)
 
     def shutdown(self, wait=True):
+        to_cancel = []
         with self._not_empty:
             self._shutdown = True
+            if not wait:
+                to_cancel = [item[2] for item in self._heap]
+                self._heap.clear()
             self._not_empty.notify_all()
+        for future in to_cancel:
+            future.cancel()
         if wait:
             for t in self._workers:
                 t.join()
@@ -119,6 +125,14 @@ class Engine:
         self.execution_timeout = execution_timeout
         self._pool = WorkerPool(idle_timeout=idle_timeout)
         self._executor = _PriorityThreadPool(max_workers=max_concurrent)
+        # Scope completion waits for phase-0 futures.  Keep that coordination
+        # off the priority executor whose futures it awaits, otherwise a
+        # completion task can occupy the last executor thread and deadlock the
+        # lower-priority work needed to satisfy it.
+        self._scope_executor = ThreadPoolExecutor(
+            max_workers=max_concurrent,
+            thread_name_prefix="engine-scope",
+        )
         self._pipelines = {}
         self._accepting = True
         self._lock = threading.Lock()
@@ -239,7 +253,7 @@ class Engine:
             )
             # Process levels sequentially in one thread so that
             # chained scopes (e.g., ["group", "all"]) execute in order.
-            self._executor.submit(
+            self._scope_executor.submit(
                 self._handle_scope_complete_chain, state,
                 complete_levels, scope,
             )
@@ -305,6 +319,10 @@ class Engine:
         logger.info("Engine shutting down (wait=%s)", wait)
         self._accepting = False
         self._executor.shutdown(wait=wait)
+        self._scope_executor.shutdown(
+            wait=wait,
+            cancel_futures=not wait,
+        )
         self._pool.shutdown_all()
         logger.debug("Engine shutdown complete")
 
@@ -334,6 +352,7 @@ class Engine:
 
     def _execute_phase0(self, state, input_data, scope, submission_idx):
         """Execute Phase 0 (immediate steps) for one job."""
+        state.record_start()
         phase = state.phases[0]
 
         pipeline_data = {
@@ -414,6 +433,7 @@ class Engine:
         state.cleanup_consumed_entries(level, value)
 
         # Execute the scoped phase
+        state.record_start(is_submission=False)
         try:
             result = self._execute_scoped_phase(
                 state, phase_idx, results, failures, scope, level)

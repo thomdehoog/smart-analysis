@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -429,7 +430,8 @@ def test_split_detection_features_engine_path_with_mock_backend(tmp_path, monkey
     )
     monkeypatch.setenv(
         "PYTHONPATH",
-        str(tmp_path / "fakepkgs") + (";" + sys.path[0] if sys.path else ""),
+        str(tmp_path / "fakepkgs")
+        + (os.pathsep + sys.path[0] if sys.path else ""),
     )
 
     wrapper_dir = tmp_path / "steps"
